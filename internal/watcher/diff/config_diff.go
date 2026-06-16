@@ -110,6 +110,13 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	} else if !reflect.DeepEqual(trimStrings(oldCfg.APIKeys), trimStrings(newCfg.APIKeys)) {
 		changes = append(changes, "api-keys: values updated (count unchanged, redacted)")
 	}
+	oldPolicies := config.NormalizeAPIKeyPolicies(oldCfg.APIKeyPolicies)
+	newPolicies := config.NormalizeAPIKeyPolicies(newCfg.APIKeyPolicies)
+	if len(oldPolicies) != len(newPolicies) {
+		changes = append(changes, fmt.Sprintf("api-key-policies count: %d -> %d", len(oldPolicies), len(newPolicies)))
+	} else if !reflect.DeepEqual(oldPolicies, newPolicies) {
+		changes = append(changes, "api-key-policies: updated (redacted)")
+	}
 	if len(oldCfg.GeminiKey) != len(newCfg.GeminiKey) {
 		changes = append(changes, fmt.Sprintf("gemini-api-key count: %d -> %d", len(oldCfg.GeminiKey), len(newCfg.GeminiKey)))
 	} else {
@@ -124,6 +131,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			}
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(changes, fmt.Sprintf("gemini[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
+			}
+			if !equalGroups(o.Groups, n.Groups) {
+				changes = append(changes, fmt.Sprintf("gemini[%d].groups: updated", i))
 			}
 			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
 				changes = append(changes, fmt.Sprintf("gemini[%d].api-key: updated", i))
@@ -159,6 +169,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			}
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(changes, fmt.Sprintf("claude[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
+			}
+			if !equalGroups(o.Groups, n.Groups) {
+				changes = append(changes, fmt.Sprintf("claude[%d].groups: updated", i))
 			}
 			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
 				changes = append(changes, fmt.Sprintf("claude[%d].api-key: updated", i))
@@ -205,6 +218,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			}
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(changes, fmt.Sprintf("codex[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
+			}
+			if !equalGroups(o.Groups, n.Groups) {
+				changes = append(changes, fmt.Sprintf("codex[%d].groups: updated", i))
 			}
 			if o.Websockets != n.Websockets {
 				changes = append(changes, fmt.Sprintf("codex[%d].websockets: %t -> %t", i, o.Websockets, n.Websockets))
@@ -285,6 +301,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(changes, fmt.Sprintf("vertex[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
 			}
+			if !equalGroups(o.Groups, n.Groups) {
+				changes = append(changes, fmt.Sprintf("vertex[%d].groups: updated", i))
+			}
 			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
 				changes = append(changes, fmt.Sprintf("vertex[%d].api-key: updated", i))
 			}
@@ -313,6 +332,10 @@ func trimStrings(in []string) []string {
 		out[i] = strings.TrimSpace(in[i])
 	}
 	return out
+}
+
+func equalGroups(a, b []string) bool {
+	return reflect.DeepEqual(config.NormalizeGroups(a), config.NormalizeGroups(b))
 }
 
 func appendPayloadConfigChanges(changes []string, oldPayload, newPayload config.PayloadConfig) []string {

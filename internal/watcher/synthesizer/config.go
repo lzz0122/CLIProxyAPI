@@ -67,6 +67,7 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*corea
 		if entry.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(entry.Priority)
 		}
+		addGroupsToAttrs(entry.Groups, attrs)
 		if base != "" {
 			attrs["base_url"] = base
 		}
@@ -122,6 +123,7 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		if ck.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(ck.Priority)
 		}
+		addGroupsToAttrs(ck.Groups, attrs)
 		if base != "" {
 			attrs["base_url"] = base
 		}
@@ -177,6 +179,7 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 		if ck.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(ck.Priority)
 		}
+		addGroupsToAttrs(ck.Groups, attrs)
 		if ck.BaseURL != "" {
 			attrs["base_url"] = ck.BaseURL
 		}
@@ -250,6 +253,11 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
 			}
+			groups := compat.Groups
+			if len(entry.Groups) > 0 {
+				groups = entry.Groups
+			}
+			addGroupsToAttrs(groups, attrs)
 			if key != "" {
 				attrs["api_key"] = key
 			}
@@ -292,6 +300,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
 			}
+			addGroupsToAttrs(compat.Groups, attrs)
 			if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
 				attrs["models_hash"] = hash
 			}
@@ -341,6 +350,7 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 		if compat.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(compat.Priority)
 		}
+		addGroupsToAttrs(compat.Groups, attrs)
 		if key != "" {
 			attrs["api_key"] = key
 		}

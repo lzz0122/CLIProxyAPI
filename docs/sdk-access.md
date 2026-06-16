@@ -57,7 +57,7 @@ Each `Result` includes the provider identifier, the resolved principal, and opti
 
 The proxy includes one built-in access provider:
 
-- `config-api-key`: Validates API keys declared under top-level `api-keys`.
+- `config-api-key`: Validates API keys declared under top-level `api-keys` and `api-key-policies`.
   - Credential sources: `Authorization: Bearer`, `X-Goog-Api-Key`, `X-Api-Key`, `?key=`, `?auth_token=`
   - Metadata: `Result.Metadata["source"]` is set to the matched source label.
 
@@ -67,7 +67,17 @@ In the CLI server and `sdk/cliproxy`, this provider is registered automatically 
 api-keys:
   - sk-test-123
   - sk-prod-456
+
+# Optional group policies. Keys without a policy can use all auths.
+api-key-policies:
+  - key: sk-test-123
+    groups: ["team-a"]
 ```
+
+Auth entries can be tagged with matching `groups`. Config-backed API keys use
+`groups` under entries such as `gemini-api-key`, `claude-api-key`,
+`codex-api-key`, `openai-compatibility`, and `vertex-api-key`. File-backed
+OAuth JSON accepts `"group": "team-a"` or `"groups": ["team-a"]`.
 
 ## Loading Providers from External Go Modules
 

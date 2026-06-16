@@ -429,6 +429,12 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 						fileData["note"] = trimmed
 					}
 				}
+				if displayName := displayNameFromJSON(data); displayName != "" {
+					fileData["display_name"] = displayName
+				}
+				if groups := groupsFromAuthFileJSON(data); len(groups) > 0 {
+					fileData["groups"] = groups
+				}
 				if wv := gjson.GetBytes(data, "websockets"); wv.Exists() {
 					switch wv.Type {
 					case gjson.True:
@@ -561,10 +567,68 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 			}
 		}
 	}
+	if displayName := authDisplayName(auth); displayName != "" {
+		entry["display_name"] = displayName
+		entry["label"] = displayName
+	}
+	if groups := authGroups(auth); len(groups) > 0 {
+		entry["groups"] = groups
+	}
 	if websockets, ok := authWebsocketsValue(auth); ok {
 		entry["websockets"] = websockets
 	}
 	return entry
+}
+
+func displayNameFromJSON(data []byte) string {
+	for _, key := range []string{"display_name", "display-name"} {
+		if node := gjson.GetBytes(data, key); node.Exists() && node.Type == gjson.String {
+			if trimmed := strings.TrimSpace(node.String()); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
+func groupsFromAuthFileJSON(data []byte) []string {
+	groups := make([]string, 0)
+	if node := gjson.GetBytes(data, "groups"); node.Exists() {
+		if node.IsArray() {
+			node.ForEach(func(_, value gjson.Result) bool {
+				if value.Type == gjson.String {
+					groups = append(groups, value.String())
+				}
+				return true
+			})
+		} else if node.Type == gjson.String {
+			groups = append(groups, node.String())
+		}
+	}
+	if node := gjson.GetBytes(data, "group"); node.Exists() && node.Type == gjson.String {
+		groups = append(groups, node.String())
+	}
+	return config.NormalizeGroups(groups)
+}
+
+func authDisplayName(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if displayName := strings.TrimSpace(authAttribute(auth, "display_name")); displayName != "" {
+		return displayName
+	}
+	return authFileDisplayName(auth.Metadata)
+}
+
+func authGroups(auth *coreauth.Auth) []string {
+	if auth == nil {
+		return nil
+	}
+	if groups := config.DecodeGroups(authAttribute(auth, "groups")); len(groups) > 0 {
+		return groups
+	}
+	return authFileGroupsFromMetadata(auth.Metadata)
 }
 
 func authWebsocketsValue(auth *coreauth.Auth) (bool, bool) {
@@ -1153,7 +1217,9 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 		provider = "unknown"
 	}
 	label := provider
-	if email, ok := metadata["email"].(string); ok && email != "" {
+	if displayName := authFileDisplayName(metadata); displayName != "" {
+		label = displayName
+	} else if email, ok := metadata["email"].(string); ok && email != "" {
 		label = email
 	}
 	lastRefresh, hasLastRefresh := extractLastRefreshTimestamp(metadata)
@@ -1191,6 +1257,9 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 		}
 	}
 	coreauth.ApplyCustomHeadersFromMetadata(auth)
+	syncAuthFileNoteAttribute(auth)
+	syncAuthFileDisplayName(auth)
+	syncAuthFileGroupsAttribute(auth)
 	return auth, nil
 }
 
@@ -1536,6 +1605,18 @@ func syncAuthFileMetadataFields(auth *coreauth.Auth, touchedRoots map[string]str
 	if _, ok := touchedRoots["note"]; ok {
 		syncAuthFileNoteAttribute(auth)
 	}
+	if _, ok := touchedRoots["display_name"]; ok {
+		syncAuthFileDisplayName(auth)
+	}
+	if _, ok := touchedRoots["display-name"]; ok {
+		syncAuthFileDisplayName(auth)
+	}
+	if _, ok := touchedRoots["groups"]; ok {
+		syncAuthFileGroupsAttribute(auth)
+	}
+	if _, ok := touchedRoots["group"]; ok {
+		syncAuthFileGroupsAttribute(auth)
+	}
 	if _, ok := touchedRoots["websockets"]; ok {
 		syncAuthFileWebsocketsAttribute(auth)
 	}
@@ -1618,6 +1699,98 @@ func syncAuthFileNoteAttribute(auth *coreauth.Auth) {
 		return
 	}
 	auth.Attributes["note"] = note
+}
+
+func authFileDisplayName(metadata map[string]any) string {
+	if metadata == nil {
+		return ""
+	}
+	for _, key := range []string{"display_name", "display-name"} {
+		if value, ok := metadata[key].(string); ok {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
+func authFileGroupsFromMetadata(metadata map[string]any) []string {
+	if metadata == nil {
+		return nil
+	}
+	groups := make([]string, 0)
+	if raw, ok := metadata["groups"]; ok {
+		groups = append(groups, authFileStringList(raw)...)
+	}
+	if raw, ok := metadata["group"]; ok {
+		groups = append(groups, authFileStringList(raw)...)
+	}
+	return config.NormalizeGroups(groups)
+}
+
+func authFileStringList(value any) []string {
+	switch typed := value.(type) {
+	case string:
+		return []string{typed}
+	case []string:
+		return typed
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text, ok := item.(string); ok {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func fallbackAuthFileLabel(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if email := authEmail(auth); email != "" {
+		return email
+	}
+	if provider := strings.TrimSpace(auth.Provider); provider != "" {
+		return provider
+	}
+	return strings.TrimSpace(auth.ID)
+}
+
+func syncAuthFileDisplayName(auth *coreauth.Auth) {
+	if auth == nil {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	displayName := authFileDisplayName(auth.Metadata)
+	if displayName == "" {
+		delete(auth.Attributes, "display_name")
+		auth.Label = fallbackAuthFileLabel(auth)
+		return
+	}
+	auth.Attributes["display_name"] = displayName
+	auth.Label = displayName
+}
+
+func syncAuthFileGroupsAttribute(auth *coreauth.Auth) {
+	if auth == nil {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	groups := authFileGroupsFromMetadata(auth.Metadata)
+	if len(groups) == 0 {
+		delete(auth.Attributes, "groups")
+		return
+	}
+	auth.Attributes["groups"] = config.EncodeGroups(groups)
 }
 
 func syncAuthFileWebsocketsAttribute(auth *coreauth.Auth) {

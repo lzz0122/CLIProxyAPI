@@ -15,6 +15,9 @@ const RequestedModelMetadataKey = "requested_model"
 // It is optional and may be absent for non-HTTP executions.
 const RequestPathMetadataKey = "request_path"
 
+// ClientAPIKeyMetadataKey stores the authenticated downstream client API key.
+const ClientAPIKeyMetadataKey = "client_api_key"
+
 // DisallowFreeAuthMetadataKey instructs auth selection to skip known free-tier credentials.
 const DisallowFreeAuthMetadataKey = "disallow_free_auth"
 

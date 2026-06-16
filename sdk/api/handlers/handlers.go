@@ -229,12 +229,18 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	// Only include it if the client explicitly provides it.
 	key := ""
 	requestPath := ""
+	apiKey := ""
 	if ctx != nil {
 		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 			key = strings.TrimSpace(ginCtx.GetHeader("Idempotency-Key"))
 			requestPath = strings.TrimSpace(ginCtx.FullPath())
 			if requestPath == "" && ginCtx.Request.URL != nil {
 				requestPath = strings.TrimSpace(ginCtx.Request.URL.Path)
+			}
+			if value, exists := ginCtx.Get("userApiKey"); exists {
+				if apiKey, okAPIKey := value.(string); okAPIKey {
+					apiKey = strings.TrimSpace(apiKey)
+				}
 			}
 		}
 	}
@@ -245,6 +251,9 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	}
 	if requestPath != "" {
 		meta[coreexecutor.RequestPathMetadataKey] = requestPath
+	}
+	if apiKey != "" {
+		meta[coreexecutor.ClientAPIKeyMetadataKey] = apiKey
 	}
 	if pinnedAuthID := pinnedAuthIDFromContext(ctx); pinnedAuthID != "" {
 		meta[coreexecutor.PinnedAuthMetadataKey] = pinnedAuthID

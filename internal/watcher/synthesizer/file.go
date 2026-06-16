@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -94,6 +95,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 			}
 			auth.Attributes["path"] = fullPath
 			auth.Attributes["source"] = fullPath
+			addGroupsToAttrs(extractGroupsFromMetadata(metadata), auth.Attributes)
 			perAccountExcluded := extractExcludedModelsFromMetadata(metadata)
 			ApplyAuthExcludedModelsMeta(auth, cfg, perAccountExcluded, "oauth")
 			coreauth.ApplyCustomHeadersFromMetadata(auth)
@@ -107,8 +109,13 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		provider = "gemini-cli"
 	}
 	label := provider
+	if displayName := displayNameFromMetadata(metadata); displayName != "" {
+		label = displayName
+	}
 	if email, _ := metadata["email"].(string); email != "" {
-		label = email
+		if displayNameFromMetadata(metadata) == "" && strings.TrimSpace(label) == provider {
+			label = email
+		}
 	}
 	// Use relative path under authDir as ID to stay consistent with the file-based token store.
 	id := fullPath
@@ -160,6 +167,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
+	addGroupsToAttrs(extractGroupsFromMetadata(metadata), a.Attributes)
 	// Read priority from auth file.
 	if rawPriority, ok := metadata["priority"]; ok {
 		switch v := rawPriority.(type) {
@@ -179,6 +187,9 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 				a.Attributes["note"] = trimmed
 			}
 		}
+	}
+	if displayName := displayNameFromMetadata(metadata); displayName != "" {
+		a.Attributes["display_name"] = displayName
 	}
 	coreauth.ApplyCustomHeadersFromMetadata(a)
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
@@ -256,6 +267,9 @@ func SynthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 		// Propagate note from primary auth to virtual auths
 		if noteVal, hasNote := primary.Attributes["note"]; hasNote && noteVal != "" {
 			attrs["note"] = noteVal
+		}
+		if groupsVal, hasGroups := primary.Attributes["groups"]; hasGroups && groupsVal != "" {
+			attrs["groups"] = groupsVal
 		}
 		for k, v := range primary.Attributes {
 			if strings.HasPrefix(k, "header:") && strings.TrimSpace(v) != "" {
@@ -370,4 +384,51 @@ func extractExcludedModelsFromMetadata(metadata map[string]any) []string {
 		}
 	}
 	return result
+}
+
+func extractGroupsFromMetadata(metadata map[string]any) []string {
+	if metadata == nil {
+		return nil
+	}
+	var groups []string
+	if raw, ok := metadata["groups"]; ok {
+		groups = append(groups, stringListFromMetadataValue(raw)...)
+	}
+	if raw, ok := metadata["group"]; ok {
+		groups = append(groups, stringListFromMetadataValue(raw)...)
+	}
+	return internalconfig.NormalizeGroups(groups)
+}
+
+func stringListFromMetadataValue(raw any) []string {
+	switch v := raw.(type) {
+	case string:
+		return []string{v}
+	case []string:
+		return v
+	case []interface{}:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func displayNameFromMetadata(metadata map[string]any) string {
+	if metadata == nil {
+		return ""
+	}
+	for _, key := range []string{"display_name", "display-name"} {
+		if value, ok := metadata[key].(string); ok {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
 }

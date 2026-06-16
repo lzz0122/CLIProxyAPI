@@ -72,6 +72,8 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 		cfg.MaxRetryCredentials = 0
 	}
 
+	cfg.SDKConfig.SanitizeAPIKeyPolicies()
+
 	cfg.NormalizePluginsConfig()
 
 	// Apply the same sanitization pipeline.

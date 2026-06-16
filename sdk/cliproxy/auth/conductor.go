@@ -3546,6 +3546,9 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		if disallowFreeAuth && isFreeCodexAuth(candidate) {
 			continue
 		}
+		if !m.authAllowedByClientAPIKeyPolicy(candidate, opts) {
+			continue
+		}
 		if _, used := tried[candidate.ID]; used {
 			continue
 		}
@@ -3597,7 +3600,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 		return auth, exec, err
 	}
 
-	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
+	if m.hasPluginScheduler() || !m.useSchedulerFastPath() || m.clientAPIKeyGroupSelectionRequired(opts) {
 		return m.pickNextLegacy(ctx, provider, model, opts, tried)
 	}
 	if strings.TrimSpace(model) != "" {
@@ -3696,6 +3699,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		if disallowFreeAuth && isFreeCodexAuth(candidate) {
 			continue
 		}
+		if !m.authAllowedByClientAPIKeyPolicy(candidate, opts) {
+			continue
+		}
 		providerKey := strings.TrimSpace(strings.ToLower(candidate.Provider))
 		if providerKey == "" {
 			continue
@@ -3761,7 +3767,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		return m.pickNextViaHome(ctx, model, opts, tried)
 	}
 
-	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
+	if m.hasPluginScheduler() || !m.useSchedulerFastPath() || m.clientAPIKeyGroupSelectionRequired(opts) {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}
 

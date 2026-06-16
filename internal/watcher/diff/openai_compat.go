@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -72,6 +73,12 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 	if oldKeyCount != newKeyCount {
 		details = append(details, fmt.Sprintf("api-keys %d -> %d", oldKeyCount, newKeyCount))
 	}
+	if !reflect.DeepEqual(config.NormalizeGroups(oldEntry.Groups), config.NormalizeGroups(newEntry.Groups)) {
+		details = append(details, "groups updated")
+	}
+	if !reflect.DeepEqual(openAIAPIKeyEntryGroupSummary(oldEntry.APIKeyEntries), openAIAPIKeyEntryGroupSummary(newEntry.APIKeyEntries)) {
+		details = append(details, "api-key groups updated")
+	}
 	if oldModelCount != newModelCount {
 		details = append(details, fmt.Sprintf("models %d -> %d", oldModelCount, newModelCount))
 	}
@@ -105,6 +112,26 @@ func countOpenAIModels(models []config.OpenAICompatibilityModel) int {
 		count++
 	}
 	return count
+}
+
+func openAIAPIKeyEntryGroupSummary(entries []config.OpenAICompatibilityAPIKey) []string {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		key := strings.TrimSpace(entry.APIKey)
+		if key == "" {
+			continue
+		}
+		groups := config.NormalizeGroups(entry.Groups)
+		out = append(out, key+"|"+strings.Join(groups, "\x00"))
+	}
+	sort.Strings(out)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func openAICompatKey(entry config.OpenAICompatibility, index int) (string, string) {

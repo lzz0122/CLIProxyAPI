@@ -57,7 +57,7 @@ default:
 
 代理内置一个访问提供者：
 
-- `config-api-key`：校验 `config.yaml` 顶层的 `api-keys`。
+- `config-api-key`：校验 `config.yaml` 顶层的 `api-keys` 和 `api-key-policies`。
   - 凭证来源：`Authorization: Bearer`、`X-Goog-Api-Key`、`X-Api-Key`、`?key=`、`?auth_token=`
   - 元数据：`Result.Metadata["source"]` 会写入匹配到的来源标识
 
@@ -67,7 +67,17 @@ default:
 api-keys:
   - sk-test-123
   - sk-prod-456
+
+# 可选分组策略。没有 policy 的 key 可以使用全部账号。
+api-key-policies:
+  - key: sk-test-123
+    groups: ["team-a"]
 ```
+
+账号可用同名 `groups` 打标签。配置型 API key 可在 `gemini-api-key`、
+`claude-api-key`、`codex-api-key`、`openai-compatibility`、`vertex-api-key`
+等条目下写 `groups`；文件型 OAuth JSON 支持 `"group": "team-a"` 或
+`"groups": ["team-a"]`。
 
 ## 引入外部 Go 模块提供者
 
