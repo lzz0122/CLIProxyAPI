@@ -176,6 +176,13 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if requestPath != "" {
 		meta[coreexecutor.RequestPathMetadataKey] = requestPath
 	}
+	if ginCtx != nil {
+		if value, exists := ginCtx.Get("userApiKey"); exists && value != nil {
+			if apiKey := strings.TrimSpace(fmt.Sprint(value)); apiKey != "" {
+				meta[coreexecutor.ClientAPIKeyMetadataKey] = apiKey
+			}
+		}
+	}
 	if pinnedAuthID := pinnedAuthIDFromContext(ctx); pinnedAuthID != "" {
 		meta[coreexecutor.PinnedAuthMetadataKey] = pinnedAuthID
 	}

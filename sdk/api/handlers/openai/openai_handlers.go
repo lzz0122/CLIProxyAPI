@@ -55,6 +55,20 @@ func (h *OpenAIAPIHandler) Models() []map[string]any {
 	return modelRegistry.GetAvailableModels("openai")
 }
 
+func (h *OpenAIAPIHandler) modelsForRequest(c *gin.Context) []map[string]any {
+	if h == nil || h.AuthManager == nil || c == nil {
+		return h.Models()
+	}
+	apiKey := ""
+	if value, exists := c.Get("userApiKey"); exists && value != nil {
+		apiKey = fmt.Sprint(value)
+	}
+	if models, restricted := h.AuthManager.AvailableModelsForClientAPIKeyPolicy(apiKey, "", "openai"); restricted {
+		return models
+	}
+	return h.Models()
+}
+
 // OpenAIModels handles the /v1/models endpoint.
 // It returns a list of available AI models with their capabilities
 // and specifications in OpenAI-compatible format.
@@ -65,8 +79,8 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 		return
 	}
 
-	// Get all available models
-	allModels := h.Models()
+	// Get all available models visible to this downstream API key.
+	allModels := h.modelsForRequest(c)
 
 	// Filter to only include the 4 required fields: id, object, created, owned_by
 	filteredModels := make([]map[string]any, len(allModels))

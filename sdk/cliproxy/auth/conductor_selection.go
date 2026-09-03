@@ -1505,6 +1505,9 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		if !eligibility.allows(candidate) {
 			continue
 		}
+		if !m.authAllowedByClientAPIKeyPolicy(candidate, opts) {
+			continue
+		}
 		if _, used := tried[candidate.ID]; used {
 			continue
 		}
@@ -1730,7 +1733,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
 
-	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
+	if m.hasPluginScheduler() || !m.useSchedulerFastPath() || m.clientAPIKeyGroupSelectionRequired(opts) {
 		return m.pickNextLegacy(ctx, provider, model, opts, tried)
 	}
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
@@ -1742,6 +1745,10 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 			}
 			if !eligibility.allows(candidate) {
 				continue
+			}
+			if !m.authAllowedByClientAPIKeyPolicy(candidate, opts) {
+				m.mu.RUnlock()
+				return m.pickNextLegacy(ctx, provider, model, opts, tried)
 			}
 			if _, used := tried[candidate.ID]; used {
 				continue
@@ -1828,6 +1835,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		if !eligibility.allows(candidate) {
 			continue
 		}
+		if !m.authAllowedByClientAPIKeyPolicy(candidate, opts) {
+			continue
+		}
 		providerKey := executorKeyFromAuth(candidate)
 		if providerKey == "" {
 			continue
@@ -1902,7 +1912,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
 
-	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
+	if m.hasPluginScheduler() || !m.useSchedulerFastPath() || m.clientAPIKeyGroupSelectionRequired(opts) {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}
 
@@ -1941,6 +1951,10 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 			}
 			if !eligibility.allows(candidate) {
 				continue
+			}
+			if !m.authAllowedByClientAPIKeyPolicy(candidate, opts) {
+				m.mu.RUnlock()
+				return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 			}
 			if _, used := tried[candidate.ID]; used {
 				continue

@@ -472,13 +472,29 @@ func (h *OpenAIResponsesAPIHandler) Models() []map[string]any {
 	return modelRegistry.GetAvailableModels("openai")
 }
 
+func (h *OpenAIResponsesAPIHandler) modelsForRequest(c *gin.Context) []map[string]any {
+	if h == nil || h.AuthManager == nil || c == nil {
+		return h.Models()
+	}
+	apiKey := ""
+	if value, exists := c.Get("userApiKey"); exists {
+		if s, ok := value.(string); ok {
+			apiKey = s
+		}
+	}
+	if models, restricted := h.AuthManager.AvailableModelsForClientAPIKeyPolicy(apiKey, "", "openai"); restricted {
+		return models
+	}
+	return h.Models()
+}
+
 // OpenAIResponsesModels handles the /v1/models endpoint.
 // It returns a list of available AI models with their capabilities
 // and specifications in OpenAIResponses-compatible format.
 func (h *OpenAIResponsesAPIHandler) OpenAIResponsesModels(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"object": "list",
-		"data":   h.Models(),
+		"data":   h.modelsForRequest(c),
 	})
 }
 

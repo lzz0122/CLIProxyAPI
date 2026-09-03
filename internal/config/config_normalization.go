@@ -163,7 +163,13 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		e.Name = strings.TrimSpace(e.Name)
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.Groups = NormalizeGroups(e.Groups)
 		e.Headers = NormalizeHeaders(e.Headers)
+		for j := range e.APIKeyEntries {
+			e.APIKeyEntries[j].APIKey = strings.TrimSpace(e.APIKeyEntries[j].APIKey)
+			e.APIKeyEntries[j].ProxyURL = strings.TrimSpace(e.APIKeyEntries[j].ProxyURL)
+			e.APIKeyEntries[j].Groups = NormalizeGroups(e.APIKeyEntries[j].Groups)
+		}
 		if e.BaseURL == "" {
 			// Skip providers with no base-url; treated as removed
 			continue
@@ -203,6 +209,7 @@ func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
 		e := entries[i]
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.Groups = NormalizeGroups(e.Groups)
 		e.Headers = NormalizeHeaders(e.Headers)
 		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
 		if e.BaseURL == "" {
@@ -221,6 +228,7 @@ func (cfg *Config) SanitizeClaudeKeys() {
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.Groups = NormalizeGroups(entry.Groups)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 		// Only a recognized value is rewritten. An unrecognized one is preserved as
@@ -246,6 +254,7 @@ func sanitizeGeminiKeyEntries(entries []GeminiKey) []GeminiKey {
 		}
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+		entry.Groups = NormalizeGroups(entry.Groups)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 		uniqueKey := formatGeminiKeyDedupID(entry)

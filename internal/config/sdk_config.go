@@ -54,6 +54,12 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
+	// APIKeyPolicies optionally restrict client API keys to named auth groups.
+	//
+	// Keys without a matching policy, or policies with no groups, can use all auths.
+	// A group value of "*" explicitly allows all auths.
+	APIKeyPolicies []APIKeyPolicy `yaml:"api-key-policies,omitempty" json:"api-key-policies,omitempty"`
+
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`
@@ -83,4 +89,13 @@ type StreamingConfig struct {
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+}
+
+// APIKeyPolicy defines optional auth group restrictions for a client API key.
+type APIKeyPolicy struct {
+	// Key is the client-facing API key.
+	Key string `yaml:"key" json:"key"`
+
+	// Groups lists auth groups this key can use. Empty or ["*"] means unrestricted.
+	Groups []string `yaml:"groups,omitempty" json:"groups,omitempty"`
 }

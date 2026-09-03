@@ -280,6 +280,12 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 						fileData["note"] = trimmed
 					}
 				}
+				if displayName := displayNameFromJSON(data); displayName != "" {
+					fileData["display_name"] = displayName
+				}
+				if groups := groupsFromAuthFileJSON(data); len(groups) > 0 {
+					fileData["groups"] = groups
+				}
 				if wv := gjson.GetBytes(data, "websockets"); wv.Exists() {
 					switch wv.Type {
 					case gjson.True:
@@ -424,6 +430,13 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 				entry["note"] = trimmed
 			}
 		}
+	}
+	if displayName := authDisplayName(auth); displayName != "" {
+		entry["display_name"] = displayName
+		entry["label"] = displayName
+	}
+	if groups := authGroups(auth); len(groups) > 0 {
+		entry["groups"] = groups
 	}
 	if weight, ok := authWeightValue(auth); ok {
 		entry[coreauth.AttributeWeight] = weight
@@ -612,6 +625,88 @@ func authEmail(auth *coreauth.Auth) string {
 		}
 	}
 	return ""
+}
+
+func displayNameFromJSON(data []byte) string {
+	for _, key := range []string{"display_name", "display-name"} {
+		if node := gjson.GetBytes(data, key); node.Exists() && node.Type == gjson.String {
+			if trimmed := strings.TrimSpace(node.String()); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
+func groupsFromAuthFileJSON(data []byte) []string {
+	groups := make([]string, 0)
+	if node := gjson.GetBytes(data, "groups"); node.Exists() {
+		if node.IsArray() {
+			node.ForEach(func(_, value gjson.Result) bool {
+				if value.Type == gjson.String {
+					groups = append(groups, value.String())
+				}
+				return true
+			})
+		} else if node.Type == gjson.String {
+			groups = append(groups, node.String())
+		}
+	}
+	if node := gjson.GetBytes(data, "group"); node.Exists() && node.Type == gjson.String {
+		groups = append(groups, node.String())
+	}
+	return config.NormalizeGroups(groups)
+}
+
+func authDisplayName(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if displayName := strings.TrimSpace(authAttribute(auth, "display_name")); displayName != "" {
+		return displayName
+	}
+	if auth.Metadata != nil {
+		for _, key := range []string{"display_name", "display-name"} {
+			if value, ok := auth.Metadata[key].(string); ok {
+				if displayName := strings.TrimSpace(value); displayName != "" {
+					return displayName
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func authGroups(auth *coreauth.Auth) []string {
+	if auth == nil {
+		return nil
+	}
+	if groups := config.DecodeGroups(authAttribute(auth, "groups")); len(groups) > 0 {
+		return groups
+	}
+	if auth.Metadata == nil {
+		return nil
+	}
+	groups := make([]string, 0)
+	for _, key := range []string{"groups", "group"} {
+		raw, ok := auth.Metadata[key]
+		if !ok {
+			continue
+		}
+		switch value := raw.(type) {
+		case string:
+			groups = append(groups, value)
+		case []string:
+			groups = append(groups, value...)
+		case []any:
+			for _, item := range value {
+				if text, ok := item.(string); ok {
+					groups = append(groups, text)
+				}
+			}
+		}
+	}
+	return config.NormalizeGroups(groups)
 }
 
 func authAttribute(auth *coreauth.Auth, key string) string {

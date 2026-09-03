@@ -1050,6 +1050,100 @@ func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any 
 	return models
 }
 
+// GetAvailableModelsForClients returns available models provided by the selected
+// client IDs. The result intentionally bypasses the global cache because the
+// visible set depends on the caller's API-key group policy.
+func (r *ModelRegistry) GetAvailableModelsForClients(handlerType string, clientIDs []string) []map[string]any {
+	allowed := make(map[string]struct{}, len(clientIDs))
+	for _, clientID := range clientIDs {
+		if clientID = strings.TrimSpace(clientID); clientID != "" {
+			allowed[clientID] = struct{}{}
+		}
+	}
+	if len(allowed) == 0 {
+		return nil
+	}
+
+	now := time.Now()
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	type clientModel struct {
+		clientIDs []string
+		info      *ModelInfo
+	}
+	modelsByID := make(map[string]*clientModel)
+	for clientID := range allowed {
+		modelIDs := r.clientModels[clientID]
+		if len(modelIDs) == 0 {
+			continue
+		}
+		clientInfos := r.clientModelInfos[clientID]
+		for _, modelID := range modelIDs {
+			modelID = strings.TrimSpace(modelID)
+			if modelID == "" {
+				continue
+			}
+			entry := modelsByID[modelID]
+			if entry == nil {
+				entry = &clientModel{}
+				modelsByID[modelID] = entry
+			}
+			entry.clientIDs = append(entry.clientIDs, clientID)
+			if entry.info == nil && clientInfos != nil {
+				entry.info = clientInfos[modelID]
+			}
+			if entry.info == nil {
+				if registration := r.models[modelID]; registration != nil {
+					entry.info = registration.Info
+				}
+			}
+		}
+	}
+
+	out := make([]map[string]any, 0, len(modelsByID))
+	for modelID, entry := range modelsByID {
+		if entry == nil || len(entry.clientIDs) == 0 {
+			continue
+		}
+		registration := r.models[modelID]
+		availableClients := len(entry.clientIDs)
+		expiredClients := 0
+		cooldownSuspended := 0
+		otherSuspended := 0
+		for _, clientID := range entry.clientIDs {
+			if registration != nil && registration.QuotaExceededClients != nil {
+				if quotaTime := registration.QuotaExceededClients[clientID]; quotaTime != nil && now.Sub(*quotaTime) < modelQuotaExceededWindow {
+					expiredClients++
+				}
+			}
+			if registration != nil && registration.SuspendedClients != nil {
+				if reason, ok := registration.SuspendedClients[clientID]; ok {
+					if strings.EqualFold(reason, "quota") {
+						cooldownSuspended++
+					} else {
+						otherSuspended++
+					}
+				}
+			}
+		}
+		effectiveClients := availableClients - expiredClients - otherSuspended
+		if effectiveClients < 0 {
+			effectiveClients = 0
+		}
+		if effectiveClients <= 0 && !(availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
+			continue
+		}
+		if model := r.convertModelToMap(entry.info, handlerType); model != nil {
+			out = append(out, model)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return strings.Compare(fmt.Sprint(out[i]["id"]), fmt.Sprint(out[j]["id"])) < 0
+	})
+	return cloneModelMaps(out)
+}
+
 func modelRegistrationAvailability(registration *ModelRegistration, now time.Time) (bool, time.Time) {
 	if registration == nil {
 		return false, time.Time{}

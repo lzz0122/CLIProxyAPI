@@ -143,17 +143,270 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 }
 
 // api-keys
-func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }
+func (h *Handler) GetAPIKeys(c *gin.Context) {
+	c.JSON(200, gin.H{
+		"api-keys":         h.cfg.SDKConfig.EffectiveAPIKeys(),
+		"api-key-policies": config.NormalizeAPIKeyPolicies(h.cfg.SDKConfig.APIKeyPolicies),
+	})
+}
+
 func (h *Handler) PutAPIKeys(c *gin.Context) {
-	h.putStringList(c, func(v []string) {
-		h.cfg.APIKeys = append([]string(nil), v...)
-	}, nil)
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	keys, policies, structured, errParse := parseAPIKeyListBody(data)
+	if errParse != nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.cfg.SDKConfig.APIKeys = config.NormalizeAPIKeys(keys)
+	if structured {
+		h.cfg.SDKConfig.APIKeyPolicies = config.NormalizeAPIKeyPolicies(policies)
+	} else {
+		h.cfg.SDKConfig.APIKeyPolicies = filterAPIKeyPoliciesForKeys(h.cfg.SDKConfig.APIKeyPolicies, h.cfg.SDKConfig.APIKeys)
+	}
+	h.cfg.SDKConfig.SanitizeAPIKeyPolicies()
+	h.persistLocked(c)
 }
+
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
-	h.patchStringList(c, &h.cfg.APIKeys, func() {})
+	var body struct {
+		Old    *string   `json:"old"`
+		New    *string   `json:"new"`
+		Index  *int      `json:"index"`
+		Value  *string   `json:"value"`
+		Key    *string   `json:"key"`
+		Groups *[]string `json:"groups"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	keys := h.cfg.SDKConfig.EffectiveAPIKeys()
+	if body.Groups != nil {
+		targetKey := apiKeyPatchTarget(body.Key, body.Value, body.New, body.Old, body.Index, keys)
+		if targetKey == "" {
+			c.JSON(400, gin.H{"error": "missing key"})
+			return
+		}
+		h.cfg.SDKConfig.APIKeys = addAPIKeyIfMissing(keys, targetKey)
+		h.cfg.SDKConfig.APIKeyPolicies = setAPIKeyPolicyGroups(h.cfg.SDKConfig.APIKeyPolicies, targetKey, *body.Groups)
+		h.cfg.SDKConfig.SanitizeAPIKeyPolicies()
+		h.persistLocked(c)
+		return
+	}
+	if body.Index != nil && body.Value != nil && *body.Index >= 0 && *body.Index < len(keys) {
+		oldKey := keys[*body.Index]
+		newKey := strings.TrimSpace(*body.Value)
+		if newKey == "" {
+			c.JSON(400, gin.H{"error": "missing value"})
+			return
+		}
+		keys[*body.Index] = newKey
+		h.cfg.SDKConfig.APIKeys = config.NormalizeAPIKeys(keys)
+		h.cfg.SDKConfig.APIKeyPolicies = renameAPIKeyPolicy(h.cfg.SDKConfig.APIKeyPolicies, oldKey, newKey)
+		h.cfg.SDKConfig.SanitizeAPIKeyPolicies()
+		h.persistLocked(c)
+		return
+	}
+	if body.Old != nil && body.New != nil {
+		oldKey := strings.TrimSpace(*body.Old)
+		newKey := strings.TrimSpace(*body.New)
+		if newKey == "" {
+			c.JSON(400, gin.H{"error": "missing new"})
+			return
+		}
+		replaced := false
+		for i := range keys {
+			if keys[i] == oldKey {
+				keys[i] = newKey
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			keys = append(keys, newKey)
+		}
+		h.cfg.SDKConfig.APIKeys = config.NormalizeAPIKeys(keys)
+		h.cfg.SDKConfig.APIKeyPolicies = renameAPIKeyPolicy(h.cfg.SDKConfig.APIKeyPolicies, oldKey, newKey)
+		h.cfg.SDKConfig.SanitizeAPIKeyPolicies()
+		h.persistLocked(c)
+		return
+	}
+	c.JSON(400, gin.H{"error": "missing fields"})
 }
+
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
-	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {})
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	keys := h.cfg.SDKConfig.EffectiveAPIKeys()
+	removeKey := ""
+	if idxStr := c.Query("index"); idxStr != "" {
+		var idx int
+		_, err := fmt.Sscanf(idxStr, "%d", &idx)
+		if err == nil && idx >= 0 && idx < len(keys) {
+			removeKey = keys[idx]
+		}
+	}
+	if removeKey == "" {
+		removeKey = strings.TrimSpace(c.Query("value"))
+	}
+	if removeKey == "" {
+		c.JSON(400, gin.H{"error": "missing index or value"})
+		return
+	}
+	h.cfg.SDKConfig.APIKeys = removeAPIKey(keys, removeKey)
+	h.cfg.SDKConfig.APIKeyPolicies = removeAPIKeyPolicy(h.cfg.SDKConfig.APIKeyPolicies, removeKey)
+	h.cfg.SDKConfig.SanitizeAPIKeyPolicies()
+	h.persistLocked(c)
+}
+
+func parseAPIKeyListBody(data []byte) ([]string, []config.APIKeyPolicy, bool, error) {
+	var keys []string
+	if err := json.Unmarshal(data, &keys); err == nil {
+		return config.NormalizeAPIKeys(keys), nil, false, nil
+	}
+	var policies []config.APIKeyPolicy
+	if err := json.Unmarshal(data, &policies); err == nil {
+		policies = config.NormalizeAPIKeyPolicies(policies)
+		return apiKeysFromPolicies(policies), policies, true, nil
+	}
+	var obj struct {
+		Items          json.RawMessage `json:"items"`
+		APIKeys        json.RawMessage `json:"api-keys"`
+		APIKeyPolicies json.RawMessage `json:"api-key-policies"`
+	}
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return nil, nil, false, err
+	}
+	if len(obj.Items) > 0 {
+		var itemKeys []string
+		if err := json.Unmarshal(obj.Items, &itemKeys); err == nil {
+			return config.NormalizeAPIKeys(itemKeys), nil, false, nil
+		}
+		var itemPolicies []config.APIKeyPolicy
+		if err := json.Unmarshal(obj.Items, &itemPolicies); err == nil {
+			itemPolicies = config.NormalizeAPIKeyPolicies(itemPolicies)
+			return apiKeysFromPolicies(itemPolicies), itemPolicies, true, nil
+		}
+		return nil, nil, false, fmt.Errorf("invalid items")
+	}
+	hasAPIKeys := len(obj.APIKeys) > 0
+	hasPolicies := len(obj.APIKeyPolicies) > 0
+	if hasAPIKeys {
+		if err := json.Unmarshal(obj.APIKeys, &keys); err != nil {
+			return nil, nil, false, err
+		}
+	}
+	if hasPolicies {
+		if err := json.Unmarshal(obj.APIKeyPolicies, &policies); err != nil {
+			return nil, nil, false, err
+		}
+	}
+	policies = config.NormalizeAPIKeyPolicies(policies)
+	keys = append(keys, apiKeysFromPolicies(policies)...)
+	keys = config.NormalizeAPIKeys(keys)
+	if !hasAPIKeys && !hasPolicies {
+		return nil, nil, false, fmt.Errorf("missing api keys")
+	}
+	return keys, policies, hasPolicies, nil
+}
+
+func apiKeysFromPolicies(policies []config.APIKeyPolicy) []string {
+	keys := make([]string, 0, len(policies))
+	for _, policy := range policies {
+		if key := strings.TrimSpace(policy.Key); key != "" {
+			keys = append(keys, key)
+		}
+	}
+	return config.NormalizeAPIKeys(keys)
+}
+
+func filterAPIKeyPoliciesForKeys(policies []config.APIKeyPolicy, keys []string) []config.APIKeyPolicy {
+	allowed := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		allowed[strings.TrimSpace(key)] = struct{}{}
+	}
+	out := make([]config.APIKeyPolicy, 0, len(policies))
+	for _, policy := range policies {
+		if _, ok := allowed[strings.TrimSpace(policy.Key)]; ok {
+			out = append(out, policy)
+		}
+	}
+	return config.NormalizeAPIKeyPolicies(out)
+}
+
+func apiKeyPatchTarget(key, value, newValue, oldValue *string, index *int, keys []string) string {
+	for _, candidate := range []*string{key, value, newValue, oldValue} {
+		if candidate != nil && strings.TrimSpace(*candidate) != "" {
+			return strings.TrimSpace(*candidate)
+		}
+	}
+	if index != nil && *index >= 0 && *index < len(keys) {
+		return strings.TrimSpace(keys[*index])
+	}
+	return ""
+}
+
+func addAPIKeyIfMissing(keys []string, key string) []string {
+	return config.NormalizeAPIKeys(append(append([]string(nil), keys...), key))
+}
+
+func setAPIKeyPolicyGroups(policies []config.APIKeyPolicy, key string, groups []string) []config.APIKeyPolicy {
+	key = strings.TrimSpace(key)
+	groups = config.NormalizeGroups(groups)
+	out := make([]config.APIKeyPolicy, 0, len(policies)+1)
+	found := false
+	for _, policy := range policies {
+		if strings.TrimSpace(policy.Key) != key {
+			out = append(out, policy)
+			continue
+		}
+		found = true
+		if len(groups) > 0 {
+			out = append(out, config.APIKeyPolicy{Key: key, Groups: groups})
+		}
+	}
+	if !found && len(groups) > 0 {
+		out = append(out, config.APIKeyPolicy{Key: key, Groups: groups})
+	}
+	return config.NormalizeAPIKeyPolicies(out)
+}
+
+func renameAPIKeyPolicy(policies []config.APIKeyPolicy, oldKey, newKey string) []config.APIKeyPolicy {
+	for i := range policies {
+		if strings.TrimSpace(policies[i].Key) == strings.TrimSpace(oldKey) {
+			policies[i].Key = strings.TrimSpace(newKey)
+		}
+	}
+	return config.NormalizeAPIKeyPolicies(policies)
+}
+
+func removeAPIKey(keys []string, key string) []string {
+	out := make([]string, 0, len(keys))
+	for _, candidate := range keys {
+		if strings.TrimSpace(candidate) != strings.TrimSpace(key) {
+			out = append(out, candidate)
+		}
+	}
+	return config.NormalizeAPIKeys(out)
+}
+
+func removeAPIKeyPolicy(policies []config.APIKeyPolicy, key string) []config.APIKeyPolicy {
+	out := make([]config.APIKeyPolicy, 0, len(policies))
+	for _, policy := range policies {
+		if strings.TrimSpace(policy.Key) != strings.TrimSpace(key) {
+			out = append(out, policy)
+		}
+	}
+	return config.NormalizeAPIKeyPolicies(out)
 }
 
 // gemini-api-key: []GeminiKey

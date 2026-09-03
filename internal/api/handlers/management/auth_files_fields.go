@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/credentialweight"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
@@ -562,6 +563,18 @@ func syncAuthFileMetadataFields(auth *coreauth.Auth, touchedRoots map[string]str
 	if _, ok := touchedRoots["note"]; ok {
 		syncAuthFileNoteAttribute(auth)
 	}
+	if _, ok := touchedRoots["display_name"]; ok {
+		syncAuthFileDisplayNameAttribute(auth)
+	}
+	if _, ok := touchedRoots["display-name"]; ok {
+		syncAuthFileDisplayNameAttribute(auth)
+	}
+	if _, ok := touchedRoots["groups"]; ok {
+		syncAuthFileGroupsAttribute(auth)
+	}
+	if _, ok := touchedRoots["group"]; ok {
+		syncAuthFileGroupsAttribute(auth)
+	}
 	if _, ok := touchedRoots["websockets"]; ok {
 		syncAuthFileWebsocketsAttribute(auth)
 	}
@@ -659,6 +672,64 @@ func syncAuthFileNoteAttribute(auth *coreauth.Auth) {
 		return
 	}
 	auth.Attributes["note"] = note
+}
+
+func syncAuthFileDisplayNameAttribute(auth *coreauth.Auth) {
+	if auth == nil {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	displayName := ""
+	for _, key := range []string{"display_name", "display-name"} {
+		if value, ok := auth.Metadata[key].(string); ok {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				displayName = trimmed
+				break
+			}
+		}
+	}
+	if displayName == "" {
+		delete(auth.Attributes, "display_name")
+		return
+	}
+	auth.Attributes["display_name"] = displayName
+	auth.Label = displayName
+}
+
+func syncAuthFileGroupsAttribute(auth *coreauth.Auth) {
+	if auth == nil {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	groups := make([]string, 0)
+	for _, key := range []string{"groups", "group"} {
+		raw, ok := auth.Metadata[key]
+		if !ok {
+			continue
+		}
+		switch value := raw.(type) {
+		case string:
+			groups = append(groups, value)
+		case []string:
+			groups = append(groups, value...)
+		case []any:
+			for _, item := range value {
+				if text, ok := item.(string); ok {
+					groups = append(groups, text)
+				}
+			}
+		}
+	}
+	groups = config.NormalizeGroups(groups)
+	if len(groups) == 0 {
+		delete(auth.Attributes, "groups")
+		return
+	}
+	auth.Attributes["groups"] = config.EncodeGroups(groups)
 }
 
 func syncAuthFileWebsocketsAttribute(auth *coreauth.Auth) {

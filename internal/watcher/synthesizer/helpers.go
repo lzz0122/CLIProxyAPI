@@ -165,3 +165,12 @@ func addConfigHeadersToAttrs(headers map[string]string, attrs map[string]string)
 		attrs["header:"+key] = val
 	}
 }
+
+func addGroupsToAttrs(groups []string, attrs map[string]string) {
+	if attrs == nil {
+		return
+	}
+	if encoded := config.EncodeGroups(groups); encoded != "" {
+		attrs["groups"] = encoded
+	}
+}

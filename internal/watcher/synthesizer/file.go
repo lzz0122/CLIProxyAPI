@@ -118,6 +118,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 				if auth.Attributes == nil {
 					auth.Attributes = make(map[string]string)
 				}
+				applyAuthFilePresentationMetadata(auth, metadata)
 				auth.Attributes[coreauth.AttributePath] = fullPath
 				auth.Attributes[coreauth.AttributeSource] = fullPath
 				auth.Attributes[coreauth.AttributeSourceBackend] = coreauth.AuthSourceFile
@@ -199,6 +200,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
+	applyAuthFilePresentationMetadata(a, metadata)
 	// Read priority from auth file.
 	if rawPriority, ok := metadata["priority"]; ok {
 		switch v := rawPriority.(type) {
@@ -237,6 +239,60 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 		}
 	}
 	return []*coreauth.Auth{a}, nil
+}
+
+func applyAuthFilePresentationMetadata(auth *coreauth.Auth, metadata map[string]any) {
+	if auth == nil || metadata == nil {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	if displayName := authFileDisplayNameValue(metadata); displayName != "" {
+		auth.Attributes["display_name"] = displayName
+		auth.Label = displayName
+	}
+	groups := authFileGroupsValue(metadata)
+	if len(groups) > 0 {
+		auth.Attributes["groups"] = config.EncodeGroups(groups)
+	}
+}
+
+func authFileDisplayNameValue(metadata map[string]any) string {
+	for _, key := range []string{"display_name", "display-name"} {
+		if value, ok := metadata[key].(string); ok {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
+func authFileGroupsValue(metadata map[string]any) []string {
+	if metadata == nil {
+		return nil
+	}
+	groups := make([]string, 0)
+	for _, key := range []string{"groups", "group"} {
+		raw, ok := metadata[key]
+		if !ok {
+			continue
+		}
+		switch value := raw.(type) {
+		case string:
+			groups = append(groups, value)
+		case []string:
+			groups = append(groups, value...)
+		case []any:
+			for _, item := range value {
+				if text, ok := item.(string); ok {
+					groups = append(groups, text)
+				}
+			}
+		}
+	}
+	return config.NormalizeGroups(groups)
 }
 
 func parsePluginFileAuths(parser PluginAuthParser, req pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {
