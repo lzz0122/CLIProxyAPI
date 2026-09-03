@@ -38,7 +38,7 @@ func (s *Server) handleInternalQuotaHealth(c *gin.Context) {
 		})
 		return
 	}
-	if s == nil || s.authManager == nil {
+	if s == nil || s.handlers == nil || s.handlers.AuthManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{
 			"success": false,
 			"reason":  "auth_manager_unavailable",
@@ -46,7 +46,7 @@ func (s *Server) handleInternalQuotaHealth(c *gin.Context) {
 		return
 	}
 
-	result := s.authManager.ClientAPIKeyQuotaHealth(apiKey, req.Models)
+	result := s.handlers.AuthManager.ClientAPIKeyQuotaHealth(apiKey, req.Models)
 	if !result.Authorized {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"success": false,
