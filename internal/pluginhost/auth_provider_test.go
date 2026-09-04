@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -117,6 +118,51 @@ func TestParseAuthDefaultsProviderFromAuthProviderIdentifier(t *testing.T) {
 	}
 }
 
+func TestParseAuthsExpandsMultiplePluginAuths(t *testing.T) {
+	host := newHostWithRecords(capabilityRecord{
+		id: "geminicli",
+		plugin: pluginapi.Plugin{
+			Capabilities: pluginapi.Capabilities{
+				AuthProvider: fakeAuthProvider{
+					identifier: "gemini-cli",
+					parseAuth: func(ctx context.Context, req pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
+						return pluginapi.AuthParseResponse{
+							Handled: true,
+							Auths: []pluginapi.AuthData{
+								{
+									Provider:    "gemini-cli",
+									ID:          "user.json",
+									FileName:    "user.json",
+									StorageJSON: []byte(`{"type":"gemini-cli"}`),
+								},
+								{
+									Provider:    "gemini-cli",
+									ID:          "user-project-a.json",
+									FileName:    "user-project-a.json",
+									StorageJSON: []byte(`{"type":"gemini-cli","project_id":"project-a"}`),
+									Metadata:    map[string]any{"project_id": "project-a"},
+								},
+							},
+						}, nil
+					},
+				},
+			},
+		},
+	})
+	host.runtimeConfig = &config.Config{AuthDir: t.TempDir()}
+
+	auths, handled, errParse := host.ParseAuths(context.Background(), pluginapi.AuthParseRequest{Provider: "gemini-cli"})
+	if errParse != nil {
+		t.Fatalf("ParseAuths() error = %v", errParse)
+	}
+	if !handled || len(auths) != 2 {
+		t.Fatalf("ParseAuths() handled=%t len=%d, want two auths", handled, len(auths))
+	}
+	if auths[1].Provider != "gemini-cli" || auths[1].Metadata["project_id"] != "project-a" {
+		t.Fatalf("second auth = %#v, want project-a virtual auth", auths[1])
+	}
+}
+
 func TestStartLoginPassesProviderBaseURLHostAndHTTPClient(t *testing.T) {
 	authDir := t.TempDir()
 	expiresAt := time.Now().Add(time.Minute).UTC()
@@ -222,6 +268,53 @@ func TestPollLoginPassesProviderStateHostAndHTTPClient(t *testing.T) {
 	}
 }
 
+func TestRefreshAuthPreservesAuthIndex(t *testing.T) {
+	host := newHostWithRecords(capabilityRecord{
+		id: "auth-plugin",
+		plugin: pluginapi.Plugin{
+			Capabilities: pluginapi.Capabilities{
+				AuthProvider: fakeAuthProvider{
+					identifier: "plugin-provider",
+					refreshAuth: func(ctx context.Context, req pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
+						if req.AuthID != "auth-1" || req.AuthProvider != "plugin-provider" {
+							t.Fatalf("RefreshAuth request = %#v, want auth id/provider", req)
+						}
+						return pluginapi.AuthRefreshResponse{
+							Auth: pluginapi.AuthData{
+								Metadata: map[string]any{"access_token": "new-token"},
+							},
+						}, nil
+					},
+				},
+			},
+		},
+	})
+
+	auth := host.AuthDataToCoreAuth(pluginapi.AuthData{
+		Provider: "plugin-provider",
+		ID:       "auth-1",
+		Metadata: map[string]any{"access_token": "old-token"},
+	}, "", "")
+	if auth == nil {
+		t.Fatal("AuthDataToCoreAuth() = nil, want auth")
+	}
+	auth.Index = "home-index-1"
+
+	refreshed, handled, errRefresh := host.RefreshAuth(context.Background(), auth)
+	if errRefresh != nil {
+		t.Fatalf("RefreshAuth() error = %v", errRefresh)
+	}
+	if !handled || refreshed == nil {
+		t.Fatalf("RefreshAuth() handled=%t auth=%#v, want refreshed auth", handled, refreshed)
+	}
+	if refreshed.Index != "home-index-1" {
+		t.Fatalf("RefreshAuth() index = %q, want home-index-1", refreshed.Index)
+	}
+	if got := refreshed.Metadata["access_token"]; got != "new-token" {
+		t.Fatalf("RefreshAuth() access_token = %q, want new-token", got)
+	}
+}
+
 func TestHostAuthDataToCoreAuthRejectsMissingProviderAndUsesAuthDir(t *testing.T) {
 	authDir := t.TempDir()
 	host := New()
@@ -276,6 +369,78 @@ func TestPluginTokenStorageMergesRawMetadataAndProviderType(t *testing.T) {
 	}
 	if decoded["old"] != "override" || decoded["new"] != "value" || decoded["type"] != "plugin-provider" {
 		t.Fatalf("saved token decoded = %#v, want merged metadata and provider type", decoded)
+	}
+}
+
+func TestPluginTokenStorageNormalizesCredentialMetadataKeys(t *testing.T) {
+	tests := []struct {
+		name     string
+		rawJSON  []byte
+		metadata map[string]any
+		want     map[string]any
+	}{
+		{
+			name:    "legacy raw keys",
+			rawJSON: []byte(`{"request-retry":2,"disable-cooling":true,"provider-specific-key":"preserved"}`),
+			want: map[string]any{
+				"request_retry":         float64(2),
+				"disable_cooling":       true,
+				"provider-specific-key": "preserved",
+				"type":                  "plugin-provider",
+			},
+		},
+		{
+			name:    "canonical metadata wins",
+			rawJSON: []byte(`{"request-retry":2,"disable-cooling":true}`),
+			metadata: map[string]any{
+				"request_retry":   0,
+				"disable_cooling": false,
+			},
+			want: map[string]any{
+				"request_retry":   float64(0),
+				"disable_cooling": false,
+				"type":            "plugin-provider",
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			storage := &pluginTokenStorage{
+				provider: "plugin-provider",
+				rawJSON:  test.rawJSON,
+			}
+			storage.SetMetadata(test.metadata)
+
+			outputs := map[string][]byte{
+				"RawJSON": storage.RawJSON(),
+			}
+			path := filepath.Join(t.TempDir(), "auth.json")
+			if errSave := storage.SaveTokenToFile(path); errSave != nil {
+				t.Fatalf("SaveTokenToFile() error = %v", errSave)
+			}
+			saved, errReadFile := os.ReadFile(path)
+			if errReadFile != nil {
+				t.Fatalf("ReadFile(saved token) error = %v", errReadFile)
+			}
+			outputs["SaveTokenToFile"] = saved
+
+			for outputName, payload := range outputs {
+				var decoded map[string]any
+				if errUnmarshal := json.Unmarshal(payload, &decoded); errUnmarshal != nil {
+					t.Fatalf("%s decode error = %v", outputName, errUnmarshal)
+				}
+				if !reflect.DeepEqual(decoded, test.want) {
+					t.Errorf("%s decoded = %#v, want %#v", outputName, decoded, test.want)
+				}
+				if _, exists := decoded["request-retry"]; exists {
+					t.Errorf("%s retained request-retry: %#v", outputName, decoded)
+				}
+				if _, exists := decoded["disable-cooling"]; exists {
+					t.Errorf("%s retained disable-cooling: %#v", outputName, decoded)
+				}
+			}
+		})
 	}
 }
 

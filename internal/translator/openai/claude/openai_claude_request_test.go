@@ -357,7 +357,7 @@ func validGPTChatReasoningSignature() string {
 	return base64.URLEncoding.EncodeToString(raw)
 }
 
-func TestConvertClaudeRequestToOpenAI_MidConversationSystemMessagesMoveToInitialSystem(t *testing.T) {
+func TestConvertClaudeRequestToOpenAI_MessageSystemRoleWrapsAsUserReminder(t *testing.T) {
 	inputJSON := `{
 		"model": "claude-sonnet-4-5",
 		"system": [{"type": "text", "text": "Top-level rules"}],
@@ -374,27 +374,88 @@ func TestConvertClaudeRequestToOpenAI_MidConversationSystemMessagesMoveToInitial
 	resultJSON := gjson.ParseBytes(result)
 	messages := resultJSON.Get("messages").Array()
 
-	if len(messages) != 4 {
-		t.Fatalf("Expected 4 messages, got %d: %s", len(messages), resultJSON.Get("messages").Raw)
+	if len(messages) != 6 {
+		t.Fatalf("Expected 6 messages, got %d: %s", len(messages), resultJSON.Get("messages").Raw)
 	}
 
 	roles := make([]string, 0, len(messages))
 	for _, message := range messages {
 		roles = append(roles, message.Get("role").String())
 	}
-	if got, want := roles, []string{"system", "user", "assistant", "user"}; fmt.Sprintf("%v", got) != fmt.Sprintf("%v", want) {
+	if got, want := roles, []string{"system", "user", "user", "assistant", "user", "user"}; fmt.Sprintf("%v", got) != fmt.Sprintf("%v", want) {
 		t.Fatalf("Unexpected message roles: got %v, want %v", got, want)
 	}
 
 	systemContent := messages[0].Get("content").Array()
-	if len(systemContent) != 3 {
-		t.Fatalf("Expected 3 system content items, got %d: %s", len(systemContent), messages[0].Get("content").Raw)
+	if len(systemContent) != 1 {
+		t.Fatalf("Expected only top-level system content, got %d items: %s", len(systemContent), messages[0].Get("content").Raw)
 	}
-	wantTexts := []string{"Top-level rules", "String mid-conversation rule", "Array mid-conversation rule"}
-	for i, want := range wantTexts {
-		if got := systemContent[i].Get("text").String(); got != want {
-			t.Fatalf("system content[%d] = %q, want %q", i, got, want)
-		}
+	if got := systemContent[0].Get("text").String(); got != "Top-level rules" {
+		t.Fatalf("system content = %q, want Top-level rules", got)
+	}
+	if got := messages[2].Get("content.0.text").String(); got != "<system-reminder>\nString mid-conversation rule\n</system-reminder>" {
+		t.Fatalf("unexpected string reminder text: %q", got)
+	}
+	if got := messages[4].Get("content.0.text").String(); got != "<system-reminder>\nArray mid-conversation rule\n</system-reminder>" {
+		t.Fatalf("unexpected array reminder text: %q", got)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_PreservesToolAdjacencyWithInterveningSystemMessage(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-5",
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "Execute tools"}]},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_1", "name": "tool_one", "input": {"a": 1}},
+					{"type": "tool_use", "id": "call_2", "name": "tool_two", "input": {"b": 2}}
+				]
+			},
+			{"role": "system", "content": "Context update between tool call and tool result"},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "call_2", "content": "result 2"},
+					{"type": "tool_result", "tool_use_id": "call_1", "content": "result 1"},
+					{"type": "text", "text": "Now summarize"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("gpt-5", []byte(inputJSON), false)
+	messages := gjson.GetBytes(result, "messages").Array()
+
+	// Expected roles order:
+	// 0: user ("Execute tools")
+	// 1: assistant (tool_calls [call_1, call_2])
+	// 2: tool (tool_call_id: call_1)
+	// 3: tool (tool_call_id: call_2)
+	// 4: user (<system-reminder>...)
+	// 5: user ("Now summarize")
+	roles := make([]string, 0, len(messages))
+	for _, msg := range messages {
+		roles = append(roles, msg.Get("role").String())
+	}
+	wantRoles := []string{"user", "assistant", "tool", "tool", "user", "user"}
+	if fmt.Sprintf("%v", roles) != fmt.Sprintf("%v", wantRoles) {
+		t.Fatalf("unexpected roles: got %v, want %v", roles, wantRoles)
+	}
+
+	// Verify tool messages immediately follow assistant
+	if messages[2].Get("tool_call_id").String() != "call_1" {
+		t.Fatalf("expected tool message 0 to respond to call_1, got %q", messages[2].Get("tool_call_id").String())
+	}
+	if messages[3].Get("tool_call_id").String() != "call_2" {
+		t.Fatalf("expected tool message 1 to respond to call_2, got %q", messages[3].Get("tool_call_id").String())
+	}
+	if messages[4].Get("content.0.text").String() != "<system-reminder>\nContext update between tool call and tool result\n</system-reminder>" {
+		t.Fatalf("unexpected system reminder content: %q", messages[4].Get("content.0.text").String())
+	}
+	if messages[5].Get("content.0.text").String() != "Now summarize" {
+		t.Fatalf("unexpected user summary content: %q", messages[5].Get("content.0.text").String())
 	}
 }
 
@@ -493,6 +554,47 @@ func TestConvertClaudeRequestToOpenAI_SystemMessageScenarios(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_ToolSchemaAddsMissingObjectProperties(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-3-opus",
+		"tools": [
+			{
+				"name": "empty_params",
+				"description": "No args",
+				"input_schema": {"type": "object"}
+			},
+			{
+				"name": "nested_params",
+				"description": "Nested args",
+				"input_schema": {
+					"type": "object",
+					"properties": {
+						"nested": {"type": "object"},
+						"items": {
+							"type": "array",
+							"items": {"type": "object"}
+						}
+					}
+				}
+			}
+		],
+		"messages": [{"role": "user", "content": "hello"}]
+	}`)
+
+	output := ConvertClaudeRequestToOpenAI("test-model", inputJSON, false)
+	outputJSON := gjson.ParseBytes(output)
+
+	if got := outputJSON.Get("tools.0.function.parameters.properties"); !got.Exists() || !got.IsObject() {
+		t.Fatalf("root object properties missing or invalid: %s", outputJSON.Get("tools.0.function.parameters").Raw)
+	}
+	if got := outputJSON.Get("tools.1.function.parameters.properties.nested.properties"); !got.Exists() || !got.IsObject() {
+		t.Fatalf("nested object properties missing or invalid: %s", outputJSON.Get("tools.1.function.parameters").Raw)
+	}
+	if got := outputJSON.Get("tools.1.function.parameters.properties.items.items.properties"); !got.Exists() || !got.IsObject() {
+		t.Fatalf("array item object properties missing or invalid: %s", outputJSON.Get("tools.1.function.parameters").Raw)
 	}
 }
 
@@ -823,5 +925,54 @@ func TestConvertClaudeRequestToOpenAI_StripsClaudeCodeAttribution(t *testing.T) 
 	}
 	if got := content[0].Get("text").String(); got != "User system prompt" {
 		t.Fatalf("Unexpected system content: %q", got)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_StopSequences(t *testing.T) {
+	tests := []struct {
+		name      string
+		inputJSON string
+		wantStop  []string
+	}{
+		{
+			name: "single stop sequence is emitted as array",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"stop_sequences": ["</block>"],
+				"messages": [{"role": "user", "content": "hi"}]
+			}`,
+			wantStop: []string{"</block>"},
+		},
+		{
+			name: "multiple stop sequences are emitted as array",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"stop_sequences": ["stop1", "stop2"],
+				"messages": [{"role": "user", "content": "hi"}]
+			}`,
+			wantStop: []string{"stop1", "stop2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			output := ConvertClaudeRequestToOpenAI("gpt-4o", []byte(tt.inputJSON), false)
+			stopRes := gjson.GetBytes(output, "stop")
+			if !stopRes.Exists() {
+				t.Fatalf("expected 'stop' field in output, got: %s", string(output))
+			}
+			if !stopRes.IsArray() {
+				t.Fatalf("expected 'stop' field to be JSON array, got: %s", stopRes.Raw)
+			}
+			items := stopRes.Array()
+			if len(items) != len(tt.wantStop) {
+				t.Fatalf("expected %d stop items, got %d (%v)", len(tt.wantStop), len(items), stopRes.Raw)
+			}
+			for i, want := range tt.wantStop {
+				if items[i].String() != want {
+					t.Errorf("stop[%d] = %q, want %q", i, items[i].String(), want)
+				}
+			}
+		})
 	}
 }

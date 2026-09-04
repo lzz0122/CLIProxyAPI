@@ -55,17 +55,32 @@ func (h *OpenAIAPIHandler) Models() []map[string]any {
 	return modelRegistry.GetAvailableModels("openai")
 }
 
+func (h *OpenAIAPIHandler) modelsForRequest(c *gin.Context) []map[string]any {
+	if h == nil || h.AuthManager == nil || c == nil {
+		return h.Models()
+	}
+	apiKey := ""
+	if value, exists := c.Get("userApiKey"); exists && value != nil {
+		apiKey = fmt.Sprint(value)
+	}
+	if models, restricted := h.AuthManager.AvailableModelsForClientAPIKeyPolicy(apiKey, "", "openai"); restricted {
+		return models
+	}
+	return h.Models()
+}
+
 // OpenAIModels handles the /v1/models endpoint.
 // It returns a list of available AI models with their capabilities
 // and specifications in OpenAI-compatible format.
 func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	if _, ok := c.Request.URL.Query()["client_version"]; ok {
-		c.JSON(http.StatusOK, h.codexClientModelsResponse())
+		clientVersion := c.Query("client_version")
+		c.JSON(http.StatusOK, h.codexClientModelsResponse(clientVersion))
 		return
 	}
 
-	// Get all available models
-	allModels := h.Models()
+	// Get all available models visible to this downstream API key.
+	allModels := h.modelsForRequest(c)
 
 	// Filter to only include the 4 required fields: id, object, created, owned_by
 	filteredModels := make([]map[string]any, len(allModels))
@@ -436,7 +451,9 @@ func (h *OpenAIAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, h.GetAlt(c))
+	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
 		cliCancel(errMsg.Error)
@@ -500,6 +517,15 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
+				if errMsg, hasPendingError := handlers.PendingStreamError(errChan); hasPendingError {
+					h.WriteErrorResponse(c, errMsg)
+					if errMsg != nil {
+						cliCancel(errMsg.Error)
+					} else {
+						cliCancel(nil)
+					}
+					return
+				}
 				// Stream closed without data? Send DONE or just headers.
 				setSSEHeaders()
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
@@ -607,6 +633,15 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
+				if errMsg, hasPendingError := handlers.PendingStreamError(errChan); hasPendingError {
+					h.WriteErrorResponse(c, errMsg)
+					if errMsg != nil {
+						cliCancel(errMsg.Error)
+					} else {
+						cliCancel(nil)
+					}
+					return
+				}
 				setSSEHeaders()
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 				_, _ = fmt.Fprintf(c.Writer, "data: [DONE]\n\n")

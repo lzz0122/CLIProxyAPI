@@ -15,6 +15,9 @@ type Plugin struct {
 	Metadata Metadata
 	// Capabilities declares the optional integration points implemented by the plugin.
 	Capabilities Capabilities
+	// SchemaVersion is the plugin contract version negotiated at registration.
+	// Zero means unset (treated as legacy by the host).
+	SchemaVersion uint32
 }
 
 // Metadata describes a plugin for registry, logging, and diagnostics.
@@ -79,6 +82,9 @@ type Capabilities struct {
 	FrontendAuthProviderExclusive bool
 	// Scheduler chooses an auth candidate before the built-in scheduler runs.
 	Scheduler Scheduler
+	// ModelRouter routes matching requests to a plugin executor, the router's own executor,
+	// or a built-in provider before model-to-provider resolution and auth selection.
+	ModelRouter ModelRouter
 	// Executor sends requests to an upstream provider or local backend.
 	Executor ProviderExecutor
 	// ExecutorModelScope declares whether Executor serves static models, OAuth auth models, or both.
@@ -100,10 +106,14 @@ type Capabilities struct {
 	ResponseAfterTranslator ResponseNormalizer
 	// RequestInterceptor rewrites execution requests before and after credential selection.
 	RequestInterceptor RequestInterceptor
+	// RequestLifecyclePlugin asynchronously receives one terminal event for each request that reached request interception.
+	RequestLifecyclePlugin RequestLifecyclePlugin
 	// ResponseInterceptor rewrites successful non-streaming HTTP execution responses before downstream delivery.
 	ResponseInterceptor ResponseInterceptor
 	// StreamChunkInterceptor rewrites successful HTTP stream chunks before downstream delivery.
 	StreamChunkInterceptor StreamChunkInterceptor
+	// WebSocketResponseObserver receives upstream WebSocket response events during execution.
+	WebSocketResponseObserver WebSocketResponseObserver
 	// ThinkingApplier applies validated thinking configuration to provider payloads.
 	ThinkingApplier ThinkingApplier
 	// UsagePlugin receives completed usage records.
@@ -250,6 +260,8 @@ type AuthParseResponse struct {
 	Handled bool
 	// Auth is the parsed auth record when Handled is true.
 	Auth AuthData
+	// Auths contains multiple parsed auth records when one auth material expands into several runtime auths.
+	Auths []AuthData
 }
 
 // AuthProvider parses, logs in, polls, and refreshes plugin provider auths.
@@ -323,6 +335,8 @@ type AuthLoginPollResponse struct {
 	Message string
 	// Auth is the completed auth record when Status is success.
 	Auth AuthData
+	// Auths contains multiple completed auth records when one login flow expands into several runtime auths.
+	Auths []AuthData
 }
 
 // AuthRefreshRequest asks a plugin to refresh provider auth data.
@@ -456,6 +470,12 @@ type Scheduler interface {
 	Pick(context.Context, SchedulerPickRequest) (SchedulerPickResponse, error)
 }
 
+// ModelRouter routes matching requests to a plugin executor, the router's own executor,
+// or a built-in provider before model-to-provider resolution and auth selection.
+type ModelRouter interface {
+	RouteModel(context.Context, ModelRouteRequest) (ModelRouteResponse, error)
+}
+
 // SchedulerPickRequest describes the routing context offered to a scheduler plugin.
 type SchedulerPickRequest struct {
 	// Plugin is the metadata of the plugin being executed.
@@ -506,6 +526,62 @@ type SchedulerPickResponse struct {
 	DelegateBuiltin string
 	// Handled reports whether the plugin made a scheduling decision.
 	Handled bool
+}
+
+// ModelRouteRequest describes the original request context offered to a model router plugin.
+type ModelRouteRequest struct {
+	// Plugin is the metadata of the plugin being executed.
+	Plugin Metadata
+	// PluginID is the host-local plugin identifier for the router being executed.
+	PluginID string
+	// SourceFormat is the original client protocol format.
+	SourceFormat string
+	// RequestedModel is the client-requested model before provider/auth selection.
+	RequestedModel string
+	// Stream reports whether the request expects streaming output.
+	Stream bool
+	// Headers contains inbound request headers.
+	Headers http.Header
+	// Query contains inbound query parameters.
+	Query url.Values
+	// Body contains the raw client request payload.
+	Body []byte
+	// Metadata is a best-effort cloned context snapshot. Treat it as read-only and JSON-like.
+	Metadata map[string]any
+	// AvailableProviders lists built-in provider keys that currently have auth registered.
+	// A router may target one of them via TargetKind=provider to run the request through the
+	// built-in auth/executor path. Treat as read-only.
+	AvailableProviders []string
+}
+
+// ModelRouteTargetKind selects the execution target for a handled model route decision.
+type ModelRouteTargetKind string
+
+const (
+	// ModelRouteTargetSelf routes to the router plugin's own executor.
+	ModelRouteTargetSelf ModelRouteTargetKind = "self"
+	// ModelRouteTargetExecutor routes to a specific plugin executor.
+	ModelRouteTargetExecutor ModelRouteTargetKind = "executor"
+	// ModelRouteTargetProvider routes through the built-in auth/executor path.
+	ModelRouteTargetProvider ModelRouteTargetKind = "provider"
+)
+
+// ModelRouteResponse returns a model router plugin decision.
+//
+// When Handled is true, set TargetKind to one of self, executor, or provider.
+// Target carries the plugin id for executor routes and the provider key for provider routes.
+type ModelRouteResponse struct {
+	// Handled reports whether the plugin made a routing decision.
+	Handled bool
+	// TargetKind selects the execution target when Handled is true.
+	TargetKind ModelRouteTargetKind
+	// Target is the plugin executor id for executor routes and the provider key for provider routes.
+	Target string
+	// TargetModel is the model name used on the provider path. When empty, the host keeps
+	// the original client-requested model. Only meaningful with TargetKind=provider.
+	TargetModel string
+	// Reason is an optional diagnostic reason for the route decision.
+	Reason string
 }
 
 // ProviderExecutor handles model execution, streaming, HTTP bridging, and token counting.
@@ -860,6 +936,11 @@ type RequestInterceptor interface {
 	InterceptRequestAfterAuth(context.Context, RequestInterceptRequest) (RequestInterceptResponse, error)
 }
 
+// RequestLifecyclePlugin receives asynchronous terminal events after execution finishes, fails, is rejected, or is canceled.
+type RequestLifecyclePlugin interface {
+	HandleRequestComplete(context.Context, RequestCompletion) error
+}
+
 // ResponseInterceptor rewrites successful non-streaming execution responses before downstream delivery.
 type ResponseInterceptor interface {
 	InterceptResponse(context.Context, ResponseInterceptRequest) (ResponseInterceptResponse, error)
@@ -868,6 +949,11 @@ type ResponseInterceptor interface {
 // StreamChunkInterceptor rewrites successful stream chunks before downstream delivery.
 type StreamChunkInterceptor interface {
 	InterceptStreamChunk(context.Context, StreamChunkInterceptRequest) (StreamChunkInterceptResponse, error)
+}
+
+// WebSocketResponseObserver observes upstream WebSocket response events received during execution.
+type WebSocketResponseObserver interface {
+	ObserveWebSocketResponseEvent(context.Context, WebSocketResponseEvent) error
 }
 
 // StreamChunkHeaderInitIndex marks the header-only stream initialization interceptor call.
@@ -907,6 +993,10 @@ type ResponseTransformRequest struct {
 
 // RequestInterceptRequest describes a request about to be executed upstream.
 type RequestInterceptRequest struct {
+	// RequestID uniquely identifies one model execution and correlates it with RequestCompletion.
+	RequestID string
+	// TraceID identifies the parent inbound HTTP request when available.
+	TraceID string
 	// SourceFormat is the original client protocol format.
 	SourceFormat string
 	// ToFormat is the selected upstream protocol format. It is empty before credential selection.
@@ -933,10 +1023,49 @@ type RequestInterceptResponse struct {
 	Body []byte
 	// ClearHeaders explicitly removes current request headers before Headers is applied.
 	ClearHeaders []string
+	// Terminate stops the interceptor chain and prevents the request from reaching an upstream executor.
+	Terminate bool
+	// StatusCode is the downstream HTTP status used when Terminate is true. Invalid values default to 403.
+	StatusCode int
+	// ResponseHeaders contains downstream response headers used when Terminate is true.
+	ResponseHeaders http.Header
+	// ResponseBody contains the downstream response body used when Terminate is true.
+	ResponseBody []byte
+}
+
+// RequestCompletionOutcome identifies how an intercepted request ended.
+type RequestCompletionOutcome string
+
+const (
+	// RequestCompletionSucceeded means the request completed successfully.
+	RequestCompletionSucceeded RequestCompletionOutcome = "succeeded"
+	// RequestCompletionFailed means model execution failed.
+	RequestCompletionFailed RequestCompletionOutcome = "failed"
+	// RequestCompletionRejected means a request interceptor terminated the request before execution.
+	RequestCompletionRejected RequestCompletionOutcome = "rejected"
+	// RequestCompletionCanceled means the request context was canceled or the downstream client disconnected.
+	RequestCompletionCanceled RequestCompletionOutcome = "canceled"
+)
+
+// RequestCompletion describes the terminal state of an intercepted request.
+type RequestCompletion struct {
+	RequestID      string
+	TraceID        string
+	SourceFormat   string
+	Model          string
+	RequestedModel string
+	Stream         bool
+	Outcome        RequestCompletionOutcome
+	StatusCode     int
+	Error          string
+	StartedAt      time.Time
+	CompletedAt    time.Time
+	Metadata       map[string]any
 }
 
 // ResponseInterceptRequest describes a successful non-streaming response.
 type ResponseInterceptRequest struct {
+	RequestID       string
 	SourceFormat    string
 	Model           string
 	RequestedModel  string
@@ -962,14 +1091,23 @@ type ResponseInterceptResponse struct {
 
 // StreamChunkInterceptRequest describes a successful stream chunk before downstream delivery.
 type StreamChunkInterceptRequest struct {
+	RequestID       string
 	SourceFormat    string
 	Model           string
 	RequestedModel  string
 	RequestHeaders  http.Header
 	ResponseHeaders http.Header
+	// OriginalRequest contains the raw client request body.
+	// Always populated on header-init (ChunkIndex == StreamChunkHeaderInitIndex), as a fresh clone.
+	// On payload chunks (ChunkIndex >= 0):
+	//   - schema_version >= 3: omitted (nil); cache from header-init or request intercept hooks
+	//   - schema_version < 3: populated as a fresh clone each call (legacy compatibility)
+	// Callers must treat this slice as read-only; hosts clone before delivery to keep snapshots isolated.
 	OriginalRequest []byte
-	RequestBody     []byte
-	Body            []byte
+	// RequestBody contains the provider/executed request payload.
+	// Same population / cloning / schema-version rules as OriginalRequest.
+	RequestBody []byte
+	Body        []byte
 	// HistoryChunks contains a bounded recent history of chunks already delivered downstream.
 	// The host currently retains at most 64 chunks and 1 MiB total history bytes.
 	HistoryChunks [][]byte
@@ -990,6 +1128,22 @@ type StreamChunkInterceptResponse struct {
 	// DropChunk skips delivery of the current payload chunk and prevents it from entering HistoryChunks.
 	// Header updates returned with DropChunk still apply to the interceptor chain state.
 	DropChunk bool
+}
+
+// WebSocketResponseEvent describes an upstream WebSocket response event received during execution.
+type WebSocketResponseEvent struct {
+	RequestID      string
+	TraceID        string
+	SourceFormat   string
+	Model          string
+	RequestedModel string
+	Provider       string
+	AuthID         string
+	AuthLabel      string
+	AuthType       string
+	EventType      string
+	Payload        []byte
+	Metadata       map[string]any
 }
 
 // PayloadResponse returns a transformed raw payload.
@@ -1207,6 +1361,9 @@ type UsageRecord struct {
 	ReasoningEffort string
 	// ServiceTier records the requested or reported service tier.
 	ServiceTier string
+	// Generate reports whether the client requested actual generation.
+	// The host normalizes omitted usage.Record values to true before delivery.
+	Generate bool
 	// RequestedAt is the time the request was received.
 	RequestedAt time.Time
 	// Latency is the total request latency.

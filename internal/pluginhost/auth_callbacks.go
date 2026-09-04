@@ -317,6 +317,7 @@ func (h *Host) buildAuthFromFileData(path string, data []byte) (*coreauth.Auth, 
 	if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
 		return nil, fmt.Errorf("invalid auth file: %w", errUnmarshal)
 	}
+	coreauth.NormalizeCredentialMetadata(metadata)
 	provider, _ := metadata["type"].(string)
 	if strings.TrimSpace(provider) == "" {
 		provider = "unknown"
@@ -350,6 +351,9 @@ func (h *Host) buildAuthFromFileData(path string, data []byte) (*coreauth.Auth, 
 			auth.NextRetryAfter = existing.NextRetryAfter
 			auth.Runtime = existing.Runtime
 		}
+	}
+	if errWeight := coreauth.ValidateAuthWeight(auth); errWeight != nil {
+		return nil, fmt.Errorf("invalid auth weight: %w", errWeight)
 	}
 	coreauth.ApplyCustomHeadersFromMetadata(auth)
 	return auth, nil
@@ -554,9 +558,6 @@ func authProjectID(auth *coreauth.Auth) string {
 	}
 	if auth.Attributes != nil {
 		if projectID := strings.TrimSpace(auth.Attributes["project_id"]); projectID != "" {
-			return projectID
-		}
-		if projectID := strings.TrimSpace(auth.Attributes["gemini_virtual_project"]); projectID != "" {
 			return projectID
 		}
 	}
