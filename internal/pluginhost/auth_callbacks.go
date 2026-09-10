@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -110,7 +111,80 @@ func (h *Host) callHostAuthGetRuntime(ctx context.Context, request []byte) ([]by
 	if entry == nil {
 		return nil, fmt.Errorf("auth runtime info not found for auth_index %s", authIndex)
 	}
-	return marshalRPCResult(pluginapi.HostAuthGetRuntimeResponse{Auth: *entry})
+	return marshalRPCResult(buildHostAuthRuntimeResponse(auth, *entry))
+}
+
+func buildHostAuthRuntimeResponse(auth *coreauth.Auth, entry pluginapi.HostAuthFileEntry) pluginapi.HostAuthGetRuntimeResponse {
+	resp := pluginapi.HostAuthGetRuntimeResponse{
+		Auth:            entry,
+		SupportedModels: hostSupportedModels(auth),
+	}
+	if auth == nil {
+		return resp
+	}
+	resp.Quota = hostAuthQuotaState(auth.Quota)
+	if len(auth.ModelStates) == 0 {
+		return resp
+	}
+	resp.ModelStates = make(map[string]pluginapi.HostAuthModelState, len(auth.ModelStates))
+	for modelID, state := range auth.ModelStates {
+		modelID = strings.TrimSpace(modelID)
+		if modelID == "" || state == nil {
+			continue
+		}
+		resp.ModelStates[modelID] = pluginapi.HostAuthModelState{
+			Status:         string(state.Status),
+			StatusMessage:  strings.TrimSpace(state.StatusMessage),
+			Unavailable:    state.Unavailable,
+			NextRetryAfter: state.NextRetryAfter,
+			Quota:          hostAuthQuotaState(state.Quota),
+		}
+	}
+	if len(resp.ModelStates) == 0 {
+		resp.ModelStates = nil
+	}
+	return resp
+}
+
+func hostAuthQuotaState(quota coreauth.QuotaState) pluginapi.HostAuthQuotaState {
+	return pluginapi.HostAuthQuotaState{
+		Exceeded:      quota.Exceeded,
+		Reason:        strings.TrimSpace(quota.Reason),
+		NextRecoverAt: quota.NextRecoverAt,
+		ObservedAt:    quota.ObservedAt,
+	}
+}
+
+func hostSupportedModels(auth *coreauth.Auth) []string {
+	if auth == nil {
+		return nil
+	}
+	modelRegistry := registry.GetGlobalRegistry()
+	models, registrationEpoch := modelRegistry.GetModelsAndEpochForClient(auth.ID)
+	if len(models) == 0 && registrationEpoch == 0 {
+		models = modelRegistry.GetAvailableModelsByProvider(auth.Provider)
+	}
+	if len(models) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(models))
+	result := make([]string, 0, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		modelID := strings.TrimSpace(model.ID)
+		if modelID == "" {
+			continue
+		}
+		if _, ok := seen[modelID]; ok {
+			continue
+		}
+		seen[modelID] = struct{}{}
+		result = append(result, modelID)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func (h *Host) callHostAuthSave(ctx context.Context, request []byte) ([]byte, error) {
@@ -396,8 +470,13 @@ func (h *Host) buildHostAuthFileEntry(auth *coreauth.Auth) *pluginapi.HostAuthFi
 		return nil
 	}
 	path := strings.TrimSpace(authAttribute(auth, "path"))
-	if path == "" && !runtimeOnly {
-		return nil
+	source := auth.AuthSourceKind()
+	if source == "" {
+		if path != "" {
+			source = coreauth.AuthSourceFile
+		} else {
+			source = coreauth.AuthSourceMemory
+		}
 	}
 	name := strings.TrimSpace(auth.FileName)
 	if name == "" {
@@ -415,7 +494,7 @@ func (h *Host) buildHostAuthFileEntry(auth *coreauth.Auth) *pluginapi.HostAuthFi
 		Disabled:       auth.Disabled,
 		Unavailable:    auth.Unavailable,
 		RuntimeOnly:    runtimeOnly,
-		Source:         "memory",
+		Source:         source,
 		Success:        auth.Success,
 		Failed:         auth.Failed,
 		RecentRequests: hostRecentRequests(auth),
@@ -428,7 +507,11 @@ func (h *Host) buildHostAuthFileEntry(auth *coreauth.Auth) *pluginapi.HostAuthFi
 	}
 	if accountType, account := auth.AccountInfo(); accountType != "" || account != "" {
 		entry.AccountType = accountType
-		entry.Account = account
+		if auth.AuthKind() == coreauth.AuthKindAPIKey {
+			entry.Account = maskHostCredential(account)
+		} else {
+			entry.Account = account
+		}
 	}
 	if !auth.CreatedAt.IsZero() {
 		entry.CreatedAt = auth.CreatedAt
@@ -445,7 +528,6 @@ func (h *Host) buildHostAuthFileEntry(auth *coreauth.Auth) *pluginapi.HostAuthFi
 	}
 	if path != "" {
 		entry.Path = path
-		entry.Source = "file"
 		if info, err := os.Stat(path); err == nil {
 			entry.Size = info.Size()
 			entry.ModTime = info.ModTime()
@@ -453,7 +535,7 @@ func (h *Host) buildHostAuthFileEntry(auth *coreauth.Auth) *pluginapi.HostAuthFi
 			if !runtimeOnly && (auth.Disabled || auth.Status == coreauth.StatusDisabled || strings.EqualFold(strings.TrimSpace(auth.StatusMessage), "removed via management api")) {
 				return nil
 			}
-			entry.Source = "memory"
+			entry.Source = coreauth.AuthSourceMemory
 		}
 	}
 	if p := strings.TrimSpace(authAttribute(auth, "priority")); p != "" {
@@ -543,6 +625,17 @@ func authEmail(auth *coreauth.Auth) string {
 		}
 	}
 	return ""
+}
+
+func maskHostCredential(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if len(value) <= 8 {
+		return "********"
+	}
+	return value[:4] + "..." + value[len(value)-4:]
 }
 
 func authProjectID(auth *coreauth.Auth) string {

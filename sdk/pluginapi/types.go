@@ -206,6 +206,19 @@ type HostConfigSummary struct {
 	ExcludedModels map[string][]string
 }
 
+const (
+	// HostFeatureSchedulerEligibleAuthFilter reports support for scheduler candidate filtering
+	// followed by the host's configured selector.
+	HostFeatureSchedulerEligibleAuthFilter = "scheduler.eligible-auth-filter.v1"
+	// HostFeatureAuthRuntimeInspection reports support for safe per-auth model and quota state.
+	HostFeatureAuthRuntimeInspection = "auth.runtime-inspection.v1"
+)
+
+// HostFeaturesResponse reports optional host extensions available to native plugins.
+type HostFeaturesResponse struct {
+	Features []string `json:"features"`
+}
+
 // ModelAlias describes one configured provider model alias.
 type ModelAlias struct {
 	// Name is the provider model name.
@@ -463,6 +476,8 @@ const (
 	SchedulerBuiltinRoundRobin = "round-robin"
 	// SchedulerBuiltinFillFirst delegates auth selection to the built-in fill-first scheduler.
 	SchedulerBuiltinFillFirst = "fill-first"
+	// SchedulerBuiltinConfigured filters candidates and then delegates to the configured selector.
+	SchedulerBuiltinConfigured = "configured"
 )
 
 // Scheduler chooses an auth candidate before the built-in scheduler runs.
@@ -522,6 +537,9 @@ type SchedulerAuthCandidate struct {
 type SchedulerPickResponse struct {
 	// AuthID identifies the selected auth record.
 	AuthID string
+	// EligibleAuthIDs filters candidates before the configured selector runs. A non-nil empty
+	// list denies the request because no credential is eligible.
+	EligibleAuthIDs []string
 	// DelegateBuiltin asks the host to use a named built-in scheduler.
 	DelegateBuiltin string
 	// Handled reports whether the plugin made a scheduling decision.
@@ -696,7 +714,7 @@ type HostAuthFileEntry struct {
 	Unavailable bool `json:"unavailable,omitempty"`
 	// RuntimeOnly reports whether the credential has no backing auth file.
 	RuntimeOnly bool `json:"runtime_only,omitempty"`
-	// Source reports whether the credential came from file or memory.
+	// Source reports the runtime credential source, such as file, config, or memory.
 	Source string `json:"source,omitempty"`
 	// Path is the backing auth file path when available.
 	Path string `json:"path,omitempty"`
@@ -752,10 +770,42 @@ type HostAuthGetResponse struct {
 	JSON json.RawMessage `json:"json"`
 }
 
+// HostAuthQuotaState describes safe credential quota state exposed to plugins.
+type HostAuthQuotaState struct {
+	// Exceeded reports whether the credential or model is currently quota-limited.
+	Exceeded bool `json:"exceeded"`
+	// Reason is the host-normalized quota reason when available.
+	Reason string `json:"reason,omitempty"`
+	// NextRecoverAt is the earliest known quota recovery time.
+	NextRecoverAt time.Time `json:"next_recover_at,omitempty"`
+	// ObservedAt is when the host last observed this quota state.
+	ObservedAt time.Time `json:"observed_at,omitempty"`
+}
+
+// HostAuthModelState describes safe per-model runtime state exposed to plugins.
+type HostAuthModelState struct {
+	// Status is the host-visible lifecycle status for the model.
+	Status string `json:"status,omitempty"`
+	// StatusMessage contains a short diagnostic without credential material.
+	StatusMessage string `json:"status_message,omitempty"`
+	// Unavailable reports whether the model is temporarily unavailable for this credential.
+	Unavailable bool `json:"unavailable,omitempty"`
+	// NextRetryAfter is the earliest known retry time for the model.
+	NextRetryAfter time.Time `json:"next_retry_after,omitempty"`
+	// Quota contains the model-scoped quota state.
+	Quota HostAuthQuotaState `json:"quota"`
+}
+
 // HostAuthGetRuntimeResponse returns runtime credential information by auth index.
 type HostAuthGetRuntimeResponse struct {
 	// Auth is the runtime credential entry.
 	Auth HostAuthFileEntry `json:"auth"`
+	// SupportedModels contains the host-visible models associated with this credential.
+	SupportedModels []string `json:"supported_models,omitempty"`
+	// Quota contains credential-scoped quota state.
+	Quota HostAuthQuotaState `json:"quota"`
+	// ModelStates contains safe runtime state keyed by model identifier.
+	ModelStates map[string]HostAuthModelState `json:"model_states,omitempty"`
 }
 
 // HostAuthSaveRequest asks the host to persist credential JSON to a physical auth file.
