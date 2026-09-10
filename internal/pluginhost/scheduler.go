@@ -74,15 +74,44 @@ func (h *Host) callScheduler(ctx context.Context, record capabilityRecord, req p
 func normalizeSchedulerResponse(resp pluginapi.SchedulerPickResponse, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, string) {
 	resp.AuthID = strings.TrimSpace(resp.AuthID)
 	resp.DelegateBuiltin = strings.TrimSpace(resp.DelegateBuiltin)
+	eligibleProvided := resp.EligibleAuthIDs != nil
+	if eligibleProvided {
+		normalized := make([]string, 0, len(resp.EligibleAuthIDs))
+		seen := make(map[string]struct{}, len(resp.EligibleAuthIDs))
+		for _, authID := range resp.EligibleAuthIDs {
+			authID = strings.TrimSpace(authID)
+			if authID == "" {
+				continue
+			}
+			if !schedulerCandidateExists(req.Candidates, authID) {
+				return pluginapi.SchedulerPickResponse{}, false, "unknown eligible auth id"
+			}
+			if _, ok := seen[authID]; ok {
+				continue
+			}
+			seen[authID] = struct{}{}
+			normalized = append(normalized, authID)
+		}
+		resp.EligibleAuthIDs = normalized
+	}
 
 	hasAuthID := resp.AuthID != ""
 	hasDelegate := resp.DelegateBuiltin != ""
-	if !hasAuthID && !hasDelegate {
+	if !hasAuthID && !hasDelegate && !eligibleProvided {
 		return pluginapi.SchedulerPickResponse{}, false, "missing auth id or delegate"
 	}
 	if hasAuthID {
+		if eligibleProvided {
+			return pluginapi.SchedulerPickResponse{}, false, "auth id cannot be combined with eligible auth ids"
+		}
 		if !schedulerCandidateExists(req.Candidates, resp.AuthID) {
 			return pluginapi.SchedulerPickResponse{}, false, "unknown auth id"
+		}
+		return resp, true, ""
+	}
+	if eligibleProvided {
+		if resp.DelegateBuiltin != pluginapi.SchedulerBuiltinConfigured {
+			return pluginapi.SchedulerPickResponse{}, false, "eligible auth ids require configured delegate"
 		}
 		return resp, true, ""
 	}
@@ -103,7 +132,7 @@ func schedulerCandidateExists(candidates []pluginapi.SchedulerAuthCandidate, aut
 
 func validSchedulerBuiltin(delegate string) bool {
 	switch delegate {
-	case pluginapi.SchedulerBuiltinRoundRobin, pluginapi.SchedulerBuiltinFillFirst:
+	case pluginapi.SchedulerBuiltinRoundRobin, pluginapi.SchedulerBuiltinFillFirst, pluginapi.SchedulerBuiltinConfigured:
 		return true
 	default:
 		return false

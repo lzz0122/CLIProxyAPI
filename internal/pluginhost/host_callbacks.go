@@ -121,6 +121,11 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
 		return h.callHostStreamClose(request)
 	case pluginabi.MethodHostLog:
 		return h.callHostLog(ctx, request)
+	case pluginabi.MethodHostFeatures:
+		return marshalRPCResult(pluginapi.HostFeaturesResponse{Features: []string{
+			pluginapi.HostFeatureSchedulerEligibleAuthFilter,
+			pluginapi.HostFeatureAuthRuntimeInspection,
+		}})
 	case pluginabi.MethodHostAuthList:
 		return h.callHostAuthList(ctx, request)
 	case pluginabi.MethodHostAuthGet:
