@@ -114,6 +114,83 @@ func (h *Host) callHostAuthGetRuntime(ctx context.Context, request []byte) ([]by
 	return marshalRPCResult(buildHostAuthRuntimeResponse(auth, *entry))
 }
 
+func (h *Host) callHostAuthHTTPDo(ctx context.Context, request []byte) ([]byte, error) {
+	var req pluginapi.HostAuthHTTPRequest
+	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+		return nil, fmt.Errorf("decode host auth http request: %w", errUnmarshal)
+	}
+	auth, errGet := h.authByIndex(req.AuthIndex)
+	if errGet != nil {
+		return nil, errGet
+	}
+	if strings.TrimSpace(req.Request.URL) == "" {
+		return nil, fmt.Errorf("url is required")
+	}
+	req.Request.Headers = cloneHeader(req.Request.Headers)
+	token := hostAuthRequestToken(auth)
+	for key, values := range req.Request.Headers {
+		for index, value := range values {
+			if !strings.Contains(value, "$TOKEN$") {
+				continue
+			}
+			if token == "" {
+				return nil, fmt.Errorf("auth token not found for auth_index %s", strings.TrimSpace(req.AuthIndex))
+			}
+			req.Request.Headers[key][index] = strings.ReplaceAll(value, "$TOKEN$", token)
+		}
+	}
+	response, errDo := h.newHTTPClient(auth, auth.Provider).Do(ctx, req.Request)
+	if errDo != nil {
+		return nil, errDo
+	}
+	return marshalRPCResult(response)
+}
+
+func hostAuthRequestToken(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if token := hostAuthTokenFromMetadata(auth.Metadata); token != "" {
+		return token
+	}
+	if auth.Attributes != nil {
+		return strings.TrimSpace(auth.Attributes["api_key"])
+	}
+	return ""
+}
+
+func hostAuthTokenFromMetadata(metadata map[string]any) string {
+	for _, key := range []string{"accessToken", "access_token"} {
+		if value, ok := metadata[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	switch token := metadata["token"].(type) {
+	case string:
+		if value := strings.TrimSpace(token); value != "" {
+			return value
+		}
+	case map[string]any:
+		for _, key := range []string{"access_token", "accessToken"} {
+			if value, ok := token[key].(string); ok && strings.TrimSpace(value) != "" {
+				return strings.TrimSpace(value)
+			}
+		}
+	case map[string]string:
+		for _, key := range []string{"access_token", "accessToken"} {
+			if value := strings.TrimSpace(token[key]); value != "" {
+				return value
+			}
+		}
+	}
+	for _, key := range []string{"id_token", "cookie"} {
+		if value, ok := metadata[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
 func buildHostAuthRuntimeResponse(auth *coreauth.Auth, entry pluginapi.HostAuthFileEntry) pluginapi.HostAuthGetRuntimeResponse {
 	resp := pluginapi.HostAuthGetRuntimeResponse{
 		Auth:            entry,
