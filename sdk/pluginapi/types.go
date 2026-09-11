@@ -212,6 +212,8 @@ const (
 	HostFeatureSchedulerEligibleAuthFilter = "scheduler.eligible-auth-filter.v1"
 	// HostFeatureAuthRuntimeInspection reports support for safe per-auth model and quota state.
 	HostFeatureAuthRuntimeInspection = "auth.runtime-inspection.v1"
+	// HostFeatureAuthHTTPRequest reports support for authenticated HTTP requests bound to one auth.
+	HostFeatureAuthHTTPRequest = "auth.http-request.v1"
 )
 
 // HostFeaturesResponse reports optional host extensions available to native plugins.
@@ -888,6 +890,13 @@ type HTTPResponse struct {
 	Headers http.Header
 	// Body contains the raw response body.
 	Body []byte
+}
+
+// HostAuthHTTPRequest asks the host to execute an HTTP request with one managed credential.
+// Header values containing $TOKEN$ are resolved inside the host and are never returned to the plugin.
+type HostAuthHTTPRequest struct {
+	AuthIndex string      `json:"auth_index"`
+	Request   HTTPRequest `json:"request"`
 }
 
 // HTTPStreamResponse describes a streaming host HTTP response.

@@ -125,6 +125,7 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
 		return marshalRPCResult(pluginapi.HostFeaturesResponse{Features: []string{
 			pluginapi.HostFeatureSchedulerEligibleAuthFilter,
 			pluginapi.HostFeatureAuthRuntimeInspection,
+			pluginapi.HostFeatureAuthHTTPRequest,
 		}})
 	case pluginabi.MethodHostAuthList:
 		return h.callHostAuthList(ctx, request)
@@ -132,6 +133,8 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
 		return h.callHostAuthGet(ctx, request)
 	case pluginabi.MethodHostAuthGetRuntime:
 		return h.callHostAuthGetRuntime(ctx, request)
+	case pluginabi.MethodHostAuthHTTPDo:
+		return h.callHostAuthHTTPDo(ctx, request)
 	case pluginabi.MethodHostAuthSave:
 		return h.callHostAuthSave(ctx, request)
 	case pluginabi.MethodHostAffinityLookup:
