@@ -890,11 +890,17 @@ func filterSchedulerAuthsByID(candidates []*Auth, authIDs []string) []*Auth {
 	return result
 }
 
-func selectorAuthsAfterSchedulerFilter(selector Selector, filtered []*Auth) []*Auth {
-	if _, sessionAffinity := selector.(*SessionAffinitySelector); sessionAffinity {
-		return filtered
+func authSliceContainsID(auths []*Auth, authID string) bool {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return false
 	}
-	return highestPriorityAuths(filtered)
+	for _, auth := range auths {
+		if auth != nil && auth.ID == authID {
+			return true
+		}
+	}
+	return false
 }
 
 func builtinSchedulerStrategy(delegate string) (schedulerStrategy, bool) {
@@ -1672,6 +1678,15 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
+	pluginCandidates := candidates
+	if pluginScheduler != nil {
+		// Eligibility plugins must see candidates before transient cooldown filtering.
+		// Otherwise a cooling credential from the caller's group disappears while
+		// healthy credentials from unrelated groups remain, and the policy filter is
+		// misreported as the source of an empty result. Work with clones after the
+		// manager lock is released because plugin execution may call back into the host.
+		pluginCandidates = cloneAuthSlice(candidates)
+	}
 	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, provider, model, time.Now(), pluginScheduler != nil)
 	if errAvailable != nil {
 		m.mu.RUnlock()
@@ -1680,7 +1695,10 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	}
 	m.mu.RUnlock()
 
-	selected, filtered, handled, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, provider, []string{provider}, model, opts, tried, available)
+	if pluginScheduler == nil {
+		pluginCandidates = available
+	}
+	selected, filtered, handled, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, provider, []string{provider}, model, opts, tried, pluginCandidates)
 	if errPick != nil {
 		m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, tried, errPick)
 		return nil, nil, errPick
@@ -1689,8 +1707,19 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		if len(filtered) == 0 {
 			return nil, nil, &Error{Code: "auth_not_found", Message: "no auth eligible after plugin scheduler filter"}
 		}
-		selectorAuths = selectorAuthsAfterSchedulerFilter(selector, filtered)
+		_, selectorAuths, errAvailable = m.availableAuthsForSelector(selector, filtered, provider, model, time.Now(), false)
+		if errAvailable != nil {
+			m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, tried, errAvailable)
+			return nil, nil, errAvailable
+		}
 		handled = false
+	} else if selected != nil && !authSliceContainsID(available, selected.ID) {
+		_, _, errAvailable = m.availableAuthsForSelector(selector, []*Auth{selected}, provider, model, time.Now(), false)
+		if errAvailable == nil {
+			errAvailable = &Error{Code: "auth_unavailable", Message: "plugin selected an unavailable auth"}
+		}
+		m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, tried, errAvailable)
+		return nil, nil, errAvailable
 	}
 	if !handled {
 		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
@@ -2012,6 +2041,10 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
+	pluginCandidates := candidates
+	if pluginScheduler != nil {
+		pluginCandidates = cloneAuthSlice(candidates)
+	}
 	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, "mixed", model, time.Now(), pluginScheduler != nil)
 	if errAvailable != nil {
 		m.mu.RUnlock()
@@ -2020,7 +2053,10 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	}
 	m.mu.RUnlock()
 
-	selected, filtered, handled, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, "mixed", providers, model, opts, tried, available)
+	if pluginScheduler == nil {
+		pluginCandidates = available
+	}
+	selected, filtered, handled, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, "mixed", providers, model, opts, tried, pluginCandidates)
 	if errPick != nil {
 		m.warnLogAuthUnavailable(ctx, providers, model, opts, tried, errPick)
 		return nil, nil, "", errPick
@@ -2029,8 +2065,19 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		if len(filtered) == 0 {
 			return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth eligible after plugin scheduler filter"}
 		}
-		selectorAuths = selectorAuthsAfterSchedulerFilter(selector, filtered)
+		_, selectorAuths, errAvailable = m.availableAuthsForSelector(selector, filtered, "mixed", model, time.Now(), false)
+		if errAvailable != nil {
+			m.warnLogAuthUnavailable(ctx, providers, model, opts, tried, errAvailable)
+			return nil, nil, "", errAvailable
+		}
 		handled = false
+	} else if selected != nil && !authSliceContainsID(available, selected.ID) {
+		_, _, errAvailable = m.availableAuthsForSelector(selector, []*Auth{selected}, "mixed", model, time.Now(), false)
+		if errAvailable == nil {
+			errAvailable = &Error{Code: "auth_unavailable", Message: "plugin selected an unavailable auth"}
+		}
+		m.warnLogAuthUnavailable(ctx, providers, model, opts, tried, errAvailable)
+		return nil, nil, "", errAvailable
 	}
 	if !handled {
 		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
